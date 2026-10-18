@@ -5,98 +5,75 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
-
+from sklearn.ensemble import IsolationForest
 
 st.set_page_config(
-    page_title="ISL Guard | Early Warning",
+    page_title="ISL Guard | AI Risk Support",
     page_icon="💧",
     layout="wide",
 )
 
-# --------------------------------------------------
-# ISL GUARD - SENTETIK ERKEN UYARI VE DURDURMA DEMOSU
-# --------------------------------------------------
-
 st.title("💧 ISL Guard")
-st.subheader("Intelligent ISL Risk Monitoring & Intervention")
+st.subheader("AI-Assisted ISL Monitoring & Decision Support")
 
 st.warning(
-    "PROOF OF CONCEPT: Bu demo sentetik veriler kullanir. "
-    "Gercek saha sensorlerine bagli degildir. "
-    "Otomatik durdurma yalnizca simule edilir."
+    "PROTOTIP: Veriler sentetiktir. AI modeli sentetik normal "
+    "veriden sapmalari arar; gercek sizinti tespiti yapmaz. "
+    "Otomatik durdurma ve oneriler yalnizca simule edilir."
 )
 
-st.sidebar.header("Demo ayarlari")
+# ---------------- SETTINGS ----------------
+
+st.sidebar.header("Sistem ayarlari")
 
 warning_threshold = st.sidebar.slider(
-    "Uyari esigi (sentetik gosterge)",
-    min_value=1.0,
-    max_value=6.0,
-    value=3.0,
-    step=0.5,
+    "Erken uyari esigi",
+    1.0, 6.0, 3.0, 0.5,
 )
 
 timeout_seconds = st.sidebar.slider(
-    "Yanitsiz kalininca otomatik durdurma suresi (saniye)",
-    min_value=5,
-    max_value=20,
-    value=10,
-    step=1,
+    "Yanitsiz kalininca durdurma suresi (saniye)",
+    5, 20, 10, 1,
 )
 
-st.sidebar.caption(
-    "Demo hizlandirilmis calisir: her saniye yaklasik "
-    "bir saatlik sentetik veri ilerler."
+max_imbalance = st.sidebar.slider(
+    "Optimizasyon icin izin verilen anlik pozitif debi farki",
+    0.0, 5.0, 1.5, 0.5,
 )
 
-
-# --------------------------------------------------
-# VERIYI BIR KEZ OLUSTUR
-# --------------------------------------------------
+# ---------------- SYNTHETIC DATA ----------------
 
 if "isl_data" not in st.session_state:
     rng = np.random.default_rng(42)
     n = 120
 
     timestamps = pd.date_range(
-        "2026-10-01",
-        periods=n,
-        freq="h",
+        "2026-10-01", periods=n, freq="h"
     )
 
-    # Normal kosullarda birbirine yakin debiler
     injection = 50 + rng.normal(0, 0.8, n)
     extraction = 50 + rng.normal(0, 0.8, n)
 
-    # SENTETIK RISK EPIZODU:
-    # 24-54 saatleri arasinda enjeksiyon artiyor,
-    # cekim azaliyor. Boylece dengesizlik olusuyor.
+    # Sentetik anomali bolgesi
     injection[24:55] += 12
     extraction[24:55] -= 2
 
     injection = np.maximum(injection, 0)
     extraction = np.maximum(extraction, 0)
 
-    # Basinc degerleri de ornek amacli uretilir
     pressure_in = (
-        250
-        + 2 * (injection - 50)
+        250 + 2 * (injection - 50)
         + rng.normal(0, 3, n)
     )
-
     pressure_out = (
-        180
-        + 2 * (extraction - 50)
+        180 + 2 * (extraction - 50)
         + rng.normal(0, 3, n)
     )
 
-    # Pozitif enjeksiyon-cekim farki
     positive_imbalance = np.maximum(
-        injection - extraction,
-        0,
+        injection - extraction, 0
     )
 
-    # Son 24 saatlik pozitif dengesizlik ortalamasi
     imbalance = (
         pd.Series(positive_imbalance)
         .rolling(24, min_periods=1)
@@ -123,18 +100,94 @@ if "isl_data" not in st.session_state:
     st.session_state.stop_reason = ""
     st.session_state.operator_decision = ""
 
+df = st.session_state.isl_data
 
-# --------------------------------------------------
-# BUTON ISLEMLERI
-# --------------------------------------------------
+# ---------------- AI ANOMALY DETECTION ----------------
+# Isolation Forest is trained only on the first 24
+# synthetic records, treated as a normal baseline.
+
+features = pd.DataFrame({
+    "injection": df["injection"],
+    "extraction": df["extraction"],
+    "pressure_difference": (
+        df["pressure_in"] - df["pressure_out"]
+    ),
+    "imbalance": df["imbalance"],
+})
+
+baseline = features.iloc[:24]
+
+ai_model = IsolationForest(
+    n_estimators=150,
+    contamination="auto",
+    random_state=42,
+)
+
+ai_model.fit(baseline)
+
+scores = ai_model.decision_function(features)
+baseline_scores = ai_model.decision_function(baseline)
+
+# Low scores mean more anomalous relative to baseline.
+ai_cutoff = np.quantile(baseline_scores, 0.05)
+ai_anomaly = scores < ai_cutoff
+
+# ---------------- OPTIMIZATION ----------------
+
+def optimize_injection(current_injection, current_extraction,
+                       allowed_imbalance):
+    """
+    Maximize injection rate subject to:
+    injection_target <= extraction + allowed_imbalance
+    and injection_target <= current_injection.
+
+    This is a simple constrained optimizer, not a validated
+    hydrogeological safety model.
+    """
+    target = min(
+        current_injection,
+        current_extraction + allowed_imbalance,
+    )
+    return max(0.0, target)
+
+
+def get_recommendation(is_anomaly, imbalance_value,
+                       threshold, current_injection,
+                       target_injection, stopped):
+    if stopped:
+        return (
+            "Sistem durdurulmus durumda. Yeniden baslatmadan "
+            "once olcumleri ve durdurma nedenini inceleyin."
+        )
+
+    if is_anomaly or imbalance_value >= threshold:
+        return (
+            "Anormal olcum oruntusu veya esik asimi var. "
+            "Debi ve basinc olcumlerini dogrulayin; "
+            "enjeksiyonu hesaplanan hedefe sinirlamayi "
+            "ve operator guvenlik prosedurunu degerlendirin."
+        )
+
+    if target_injection < current_injection - 0.01:
+        return (
+            "Optimizasyon, tanimli debi farki kisiti icin "
+            "daha dusuk bir enjeksiyon hedefi oneriyor. "
+            "Bu hedef saha icin dogrulanmis guvenli deger degildir."
+        )
+
+    return (
+        "AI modeli sentetik referans veriden belirgin bir "
+        "sapma isaretlemiyor. Olcumleri izlemeye devam edin."
+    )
+
+
+# ---------------- USER ACTIONS ----------------
 
 def stop_system():
     st.session_state.stopped = True
     st.session_state.running = False
     st.session_state.pending_alert = False
-    st.session_state.stop_index = (
-        st.session_state.current_index
-    )
+    st.session_state.stop_index = st.session_state.current_index
     st.session_state.stop_reason = (
         "Operator sistemi durdurmayi secti."
     )
@@ -166,15 +219,10 @@ st.button(
     on_click=reset_demo,
 )
 
-
-# --------------------------------------------------
-# CANLI IZLEME
-# Her saniye yeni bir sentetik saat incelenir.
-# --------------------------------------------------
+# ---------------- LIVE MONITOR ----------------
 
 @st.fragment(run_every="1s")
 def live_monitor():
-
     df = st.session_state.isl_data
 
     if (
@@ -186,10 +234,14 @@ def live_monitor():
     i = st.session_state.current_index
     row = df.iloc[i]
 
-    current_imbalance = float(row["imbalance"])
-    risk_now = current_imbalance >= warning_threshold
+    imbalance_value = float(row["imbalance"])
+    anomaly_now = bool(ai_anomaly[i])
 
-    # Esik ilk kez asildiginda otomatik uyari olustur.
+    # Combine the existing threshold rule with AI anomaly flag.
+    risk_now = (
+        imbalance_value >= warning_threshold or anomaly_now
+    )
+
     if (
         risk_now
         and not st.session_state.alert_latched
@@ -202,15 +254,12 @@ def live_monitor():
         )
         st.session_state.operator_decision = ""
 
-    # Riskli durum sona erdiginde yeni bir uyariya izin ver.
     if (
         not risk_now
         and not st.session_state.pending_alert
     ):
         st.session_state.alert_latched = False
-        st.session_state.operator_decision = ""
 
-    # Operator yanit vermezse otomatik durdurma simule edilir.
     if (
         st.session_state.pending_alert
         and st.session_state.alert_deadline is not None
@@ -221,8 +270,7 @@ def live_monitor():
         st.session_state.pending_alert = False
         st.session_state.stop_index = i
         st.session_state.stop_reason = (
-            "Operator yanit vermedigi icin "
-            "zaman asiminda otomatik durdurma uygulandi."
+            "Operator yanit vermedi; simule otomatik durdurma."
         )
         st.session_state.operator_decision = (
             "Yanitsiz kalindi - otomatik durdurma"
@@ -234,187 +282,145 @@ def live_monitor():
     if stopped:
         status = "SISTEM DURDURULDU"
     elif pending:
-        status = "ACIL OPERATOR YANITI BEKLENIYOR"
+        status = "OPERATOR YANITI BEKLENIYOR"
     elif risk_now:
-        status = "RISK ESIGI ASILDI"
+        status = "ANOMALI / ESİK ASIMI"
     else:
         status = "NORMAL IZLEME"
 
-    # Durum gostergeleri
-    c1, c2, c3, c4 = st.columns(4)
+    target = optimize_injection(
+        float(row["injection"]),
+        float(row["extraction"]),
+        max_imbalance,
+    )
 
+    recommendation = get_recommendation(
+        anomaly_now,
+        imbalance_value,
+        warning_threshold,
+        float(row["injection"]),
+        target,
+        stopped,
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Sistem durumu", status)
-    c2.metric(
-        "Enjeksiyon debisi",
-        f"{row['injection']:.1f} m³/h",
-    )
-    c3.metric(
-        "Cekim debisi",
-        f"{row['extraction']:.1f} m³/h",
-    )
-    c4.metric(
-        "Dengesizlik gostergesi",
-        f"{current_imbalance:.2f}",
-        delta=f"Esik: {warning_threshold:.1f}",
-    )
+    c2.metric("Enjeksiyon", f"{row['injection']:.1f} m³/h")
+    c3.metric("Cekim", f"{row['extraction']:.1f} m³/h")
+    c4.metric("AI anomali", "EVET" if anomaly_now else "Hayir")
 
     st.caption(
-        f"Simule edilen zaman: {row['timestamp']} | "
-        f"Kayit: {i + 1}/{len(df)}"
+        f"Simule zaman: {row['timestamp']} | "
+        f"Kayit {i + 1}/{len(df)}"
     )
 
-    # Belirgin, otomatik uyarı paneli
     if pending:
         remaining = max(
             0,
-            int(
-                st.session_state.alert_deadline
-                - time.time()
-                + 0.99
-            ),
+            int(st.session_state.alert_deadline - time.time() + 0.99),
         )
 
         st.error(
             f"""
-            ## ⚠️ ERKEN UYARI: DENGESIZLIK ESIGI ASILDI
+            ## ⚠️ ERKEN UYARI
 
-            **Uyari nedeni:** 24 saatlik pozitif debi farki
-            ortalamasi belirlenen esige ulasti veya asti.
+            **Tetiklenme nedeni:** {
+                "AI anomali tespiti" if anomaly_now
+                else "Debi dengesizligi esik asimi"
+            }
 
-            **Olculen sentetik gosterge:** {current_imbalance:.2f}
+            **24 saatlik dengesizlik gostergesi:** {
+                imbalance_value:.2f
+            }
 
-            **Esik:** {warning_threshold:.2f}
+            **AI anomali skoru:** {scores[i]:.4f}
 
-            ### Sistemi simdi durduralim mi?
-
-            {remaining} saniye icinde yanit vermezsen
-            demo sistemi otomatik olarak durduracak.
+            **{remaining} saniye icinde yanit verin.**
+            Yanitsiz kalinirsa demo otomatik durdurulacak.
             """
         )
 
         left, right = st.columns(2)
-
         with left:
             st.button(
-                "🛑 Evet, sistemi durdur",
-                key="confirm_stop",
+                "🛑 Sistemi durdur",
+                key="stop_button",
                 type="primary",
                 on_click=stop_system,
                 use_container_width=True,
             )
-
         with right:
             st.button(
-                "Devam et, izlemeyi surdur",
-                key="confirm_continue",
+                "Devam et",
+                key="continue_button",
                 on_click=continue_system,
                 use_container_width=True,
             )
 
     elif stopped:
-        st.error(
-            "## 🛑 SISTEM DURDURULDU\n\n"
-            + st.session_state.stop_reason
-        )
-
-        st.info(
-            "Bu demoda enjeksiyon ve cekim islemleri "
-            "durdurulmus kabul edilir. Gercek ekipman "
-            "kontrol edilmiyor."
-        )
+        st.error("## 🛑 SISTEM DURDURULDU")
+        st.write(st.session_state.stop_reason)
 
     elif risk_now:
         st.warning(
-            "Esik asildi. Operator devam etmeyi secti; "
-            "gosterge izlenmeye devam ediyor. "
-            "Bu durum gercek bir sizinti tespiti degildir."
+            "Anomali veya esik asimi goruluyor. "
+            "Operator devam etmeyi secti; gostergeler izleniyor."
         )
-
     else:
-        st.success(
-            "Esik asimi yok. Sentetik veriler izleniyor."
-        )
+        st.success("Sentetik veriler izleniyor; uyari kosulu yok.")
 
-    if st.session_state.operator_decision:
-        st.caption(
-            "Son islem: "
-            + st.session_state.operator_decision
-        )
+    st.markdown("### AI destekli öneri")
+    st.info(recommendation)
 
-    # --------------------------------------------------
-    # GRAFIKLER
-    # --------------------------------------------------
+    st.markdown("### Optimizasyon sonucu")
+    o1, o2, o3 = st.columns(3)
+    o1.metric("Mevcut enjeksiyon", f"{row['injection']:.2f} m³/h")
+    o2.metric("Hesaplanan hedef", f"{target:.2f} m³/h")
+    o3.metric(
+        "Hedef farki",
+        f"{target - row['injection']:.2f} m³/h",
+    )
 
-    visible = df.iloc[max(0, i - 47): i + 1]
+    st.caption(
+        "Hedef, enjeksiyon debisini cekim debisi + tanimli "
+        "izin verilen fark ile sinirlayan basit bir optimizasyondur. "
+        "Gercek saha icin guvenli calisma noktasi degildir."
+    )
 
+    visible = df.iloc[max(0, i - 47):i + 1]
+
+    st.markdown("### Debi izleme")
     fig, ax = plt.subplots(figsize=(11, 4))
-
-    ax.plot(
-        visible["timestamp"],
-        visible["injection"],
-        label="Enjeksiyon (sentetik)",
-    )
-
-    ax.plot(
-        visible["timestamp"],
-        visible["extraction"],
-        label="Cekim (sentetik)",
-    )
-
-    # Durdurma gerceklesmisse etkin debileri sifirla.
-    if stopped and st.session_state.stop_index is not None:
-        stop_time = df.iloc[
-            st.session_state.stop_index
-        ]["timestamp"]
-
-        ax.axvline(
-            stop_time,
-            linestyle="--",
-            label="Simule durdurma zamani",
-        )
-
-    ax.set_title("Debi izleme")
-    ax.set_ylabel("Debi (m³/h)")
+    ax.plot(visible["timestamp"], visible["injection"], label="Enjeksiyon")
+    ax.plot(visible["timestamp"], visible["extraction"], label="Cekim")
     ax.legend()
     ax.grid(alpha=0.25)
     fig.autofmt_xdate()
     st.pyplot(fig)
     plt.close(fig)
 
+    st.markdown("### AI anomali skoru ve uyari esigi")
     fig2, ax2 = plt.subplots(figsize=(11, 4))
-
     ax2.plot(
         visible["timestamp"],
-        visible["imbalance"],
-        label="24 saatlik dengesizlik gostergesi",
+        scores[max(0, i - 47):i + 1],
+        label="Isolation Forest skoru",
     )
-
     ax2.axhline(
-        warning_threshold,
+        ai_cutoff,
         linestyle="--",
-        label="Uyari esigi",
+        label="Sentetik referans esigi",
     )
-
-    ax2.set_title("Erken uyari gostergesi")
-    ax2.set_ylabel("Sentetik gosterge")
     ax2.legend()
     ax2.grid(alpha=0.25)
     fig2.autofmt_xdate()
     st.pyplot(fig2)
     plt.close(fig2)
 
-    # Son kayitlar
     with st.expander("Son sentetik kayitlari gor"):
-        st.dataframe(
-            visible.tail(12),
-            use_container_width=True,
-        )
-
-    st.caption(
-        "Not: Uyari, sentetik debi farki gostergesine "
-        "dayanir. Bu gosterge tek basina yer alti suyu "
-        "sizintisini kanitlamaz."
-    )
+        view = visible.copy()
+        view["AI_anomali"] = ai_anomaly[max(0, i - 47):i + 1]
+        st.dataframe(view.tail(12), use_container_width=True)
 
 
 live_monitor()
