@@ -1,178 +1,420 @@
 
-import streamlit as st
-import pandas as pd
-import numpy as np
+import time
+
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import streamlit as st
+
 
 st.set_page_config(
-    page_title="ISL Guard",
+    page_title="ISL Guard | Early Warning",
     page_icon="💧",
-    layout="wide"
+    layout="wide",
 )
+
+# --------------------------------------------------
+# ISL GUARD - SENTETIK ERKEN UYARI VE DURDURMA DEMOSU
+# --------------------------------------------------
 
 st.title("💧 ISL Guard")
-st.subheader("Intelligent ISL Risk Monitoring & Intervention Demo")
+st.subheader("Intelligent ISL Risk Monitoring & Intervention")
 
 st.warning(
-    "Proof of concept: all data and thresholds are synthetic. "
-    "This is not a validated groundwater leakage prediction system."
+    "PROOF OF CONCEPT: Bu demo sentetik veriler kullanir. "
+    "Gercek saha sensorlerine bagli degildir. "
+    "Otomatik durdurma yalnizca simule edilir."
 )
 
-# Demo controls
-st.sidebar.header("Simulation controls")
+st.sidebar.header("Demo ayarlari")
+
 warning_threshold = st.sidebar.slider(
-    "Warning threshold (demo)",
+    "Uyari esigi (sentetik gosterge)",
     min_value=1.0,
-    max_value=5.0,
+    max_value=6.0,
     value=3.0,
-    step=0.1
+    step=0.5,
 )
 
-timeout_hours = st.sidebar.slider(
-    "Operator response timeout (hours)",
-    min_value=1,
-    max_value=6,
-    value=2
+timeout_seconds = st.sidebar.slider(
+    "Yanitsiz kalininca otomatik durdurma suresi (saniye)",
+    min_value=5,
+    max_value=20,
+    value=10,
+    step=1,
 )
 
-# Generate reproducible demo data
-rng = np.random.default_rng(42)
-hours = 720
-timestamps = pd.date_range(
-    "2026-11-01",
-    periods=hours,
-    freq="h"
+st.sidebar.caption(
+    "Demo hizlandirilmis calisir: her saniye yaklasik "
+    "bir saatlik sentetik veri ilerler."
 )
 
-injection = np.full(hours, 50.0)
-extraction = np.full(hours, 50.0)
 
-injection[240:480] += np.linspace(0, 10, 240)
-extraction[240:480] += np.linspace(0, -20, 240)
+# --------------------------------------------------
+# VERIYI BIR KEZ OLUSTUR
+# --------------------------------------------------
 
-injection[480:] += np.linspace(10, -15, 240)
-extraction[480:] += np.linspace(-20, 10, 240)
+if "isl_data" not in st.session_state:
+    rng = np.random.default_rng(42)
+    n = 120
 
-diurnal = 2 * np.sin(2 * np.pi * np.arange(hours) / 24)
-injection += diurnal + rng.normal(0, 1.2, hours)
-extraction += diurnal + rng.normal(0, 1.2, hours)
+    timestamps = pd.date_range(
+        "2026-10-01",
+        periods=n,
+        freq="h",
+    )
 
-injection = np.maximum(injection, 0)
-extraction = np.maximum(extraction, 0)
+    # Normal kosullarda birbirine yakin debiler
+    injection = 50 + rng.normal(0, 0.8, n)
+    extraction = 50 + rng.normal(0, 0.8, n)
 
-delta_q = injection - extraction
-positive_delta = np.maximum(delta_q, 0)
+    # SENTETIK RISK EPIZODU:
+    # 24-54 saatleri arasinda enjeksiyon artiyor,
+    # cekim azaliyor. Boylece dengesizlik olusuyor.
+    injection[24:55] += 12
+    extraction[24:55] -= 2
 
-imbalance = (
-    pd.Series(positive_delta)
-    .rolling(24, min_periods=1)
-    .mean()
-    .to_numpy()
+    injection = np.maximum(injection, 0)
+    extraction = np.maximum(extraction, 0)
+
+    # Basinc degerleri de ornek amacli uretilir
+    pressure_in = (
+        250
+        + 2 * (injection - 50)
+        + rng.normal(0, 3, n)
+    )
+
+    pressure_out = (
+        180
+        + 2 * (extraction - 50)
+        + rng.normal(0, 3, n)
+    )
+
+    # Pozitif enjeksiyon-cekim farki
+    positive_imbalance = np.maximum(
+        injection - extraction,
+        0,
+    )
+
+    # Son 24 saatlik pozitif dengesizlik ortalamasi
+    imbalance = (
+        pd.Series(positive_imbalance)
+        .rolling(24, min_periods=1)
+        .mean()
+        .to_numpy()
+    )
+
+    st.session_state.isl_data = pd.DataFrame({
+        "timestamp": timestamps,
+        "injection": injection,
+        "extraction": extraction,
+        "pressure_in": pressure_in,
+        "pressure_out": pressure_out,
+        "imbalance": imbalance,
+    })
+
+    st.session_state.current_index = 0
+    st.session_state.running = True
+    st.session_state.stopped = False
+    st.session_state.stop_index = None
+    st.session_state.pending_alert = False
+    st.session_state.alert_latched = False
+    st.session_state.alert_deadline = None
+    st.session_state.stop_reason = ""
+    st.session_state.operator_decision = ""
+
+
+# --------------------------------------------------
+# BUTON ISLEMLERI
+# --------------------------------------------------
+
+def stop_system():
+    st.session_state.stopped = True
+    st.session_state.running = False
+    st.session_state.pending_alert = False
+    st.session_state.stop_index = (
+        st.session_state.current_index
+    )
+    st.session_state.stop_reason = (
+        "Operator sistemi durdurmayi secti."
+    )
+    st.session_state.operator_decision = "Durdurma onaylandi"
+
+
+def continue_system():
+    st.session_state.pending_alert = False
+    st.session_state.alert_deadline = None
+    st.session_state.operator_decision = (
+        "Operator devam etmeyi secti."
+    )
+
+
+def reset_demo():
+    st.session_state.current_index = 0
+    st.session_state.running = True
+    st.session_state.stopped = False
+    st.session_state.stop_index = None
+    st.session_state.pending_alert = False
+    st.session_state.alert_latched = False
+    st.session_state.alert_deadline = None
+    st.session_state.stop_reason = ""
+    st.session_state.operator_decision = ""
+
+
+st.button(
+    "↻ Simulasyonu bastan baslat",
+    on_click=reset_demo,
 )
 
-pressure_in = 250 + 3 * (injection - 50) + rng.normal(0, 5, hours)
-pressure_out = 180 + 2.5 * (extraction - 50) + rng.normal(0, 4, hours)
 
-pressure_in = np.maximum(pressure_in, 50)
-pressure_out = np.maximum(pressure_out, 30)
+# --------------------------------------------------
+# CANLI IZLEME
+# Her saniye yeni bir sentetik saat incelenir.
+# --------------------------------------------------
 
-gradient_proxy = (pressure_in - pressure_out) / 100 + 0.05 * delta_q
+@st.fragment(run_every="1s")
+def live_monitor():
 
-warning = imbalance >= warning_threshold
-risk_condition = (gradient_proxy > 1.8) | (imbalance > 4.5)
+    df = st.session_state.isl_data
 
-# Simple illustrative intervention rule
-controlled_injection = injection.copy()
-active = False
-warning_since = None
-intervention = np.zeros(hours, dtype=bool)
+    if (
+        st.session_state.running
+        and st.session_state.current_index < len(df) - 1
+    ):
+        st.session_state.current_index += 1
 
-for i in range(hours):
-    if not active:
-        if warning[i]:
-            if warning_since is None:
-                warning_since = i
-            if i - warning_since >= timeout_hours:
-                active = True
-        elif imbalance[i] < warning_threshold * 0.8:
-            warning_since = None
-    elif imbalance[i] < warning_threshold * 0.8:
-        active = False
-        warning_since = None
+    i = st.session_state.current_index
+    row = df.iloc[i]
 
-    intervention[i] = active
+    current_imbalance = float(row["imbalance"])
+    risk_now = current_imbalance >= warning_threshold
 
-    if active:
-        controlled_injection[i] = min(injection[i], extraction[i])
+    # Esik ilk kez asildiginda otomatik uyari olustur.
+    if (
+        risk_now
+        and not st.session_state.alert_latched
+        and not st.session_state.stopped
+    ):
+        st.session_state.pending_alert = True
+        st.session_state.alert_latched = True
+        st.session_state.alert_deadline = (
+            time.time() + timeout_seconds
+        )
+        st.session_state.operator_decision = ""
 
-controlled_delta = np.maximum(controlled_injection - extraction, 0)
+    # Riskli durum sona erdiginde yeni bir uyariya izin ver.
+    if (
+        not risk_now
+        and not st.session_state.pending_alert
+    ):
+        st.session_state.alert_latched = False
+        st.session_state.operator_decision = ""
 
-# Dashboard
-latest = -1
-current_status = (
-    "INTERVENTION ACTIVE" if intervention[latest]
-    else "WARNING" if warning[latest]
-    else "NORMAL"
-)
+    # Operator yanit vermezse otomatik durdurma simule edilir.
+    if (
+        st.session_state.pending_alert
+        and st.session_state.alert_deadline is not None
+        and time.time() >= st.session_state.alert_deadline
+    ):
+        st.session_state.stopped = True
+        st.session_state.running = False
+        st.session_state.pending_alert = False
+        st.session_state.stop_index = i
+        st.session_state.stop_reason = (
+            "Operator yanit vermedigi icin "
+            "zaman asiminda otomatik durdurma uygulandi."
+        )
+        st.session_state.operator_decision = (
+            "Yanitsiz kalindi - otomatik durdurma"
+        )
 
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Current status", current_status)
-col2.metric("Injection rate", f"{injection[latest]:.1f} m³/h")
-col3.metric("Extraction rate", f"{extraction[latest]:.1f} m³/h")
-col4.metric("Synthetic indicator", f"{imbalance[latest]:.2f}")
+    stopped = st.session_state.stopped
+    pending = st.session_state.pending_alert
 
-st.markdown("### Monitoring trends")
+    if stopped:
+        status = "SISTEM DURDURULDU"
+    elif pending:
+        status = "ACIL OPERATOR YANITI BEKLENIYOR"
+    elif risk_now:
+        status = "RISK ESIGI ASILDI"
+    else:
+        status = "NORMAL IZLEME"
 
-fig, ax = plt.subplots(figsize=(12, 4))
-ax.plot(timestamps, injection, label="Injection")
-ax.plot(timestamps, extraction, label="Extraction")
-ax.set_ylabel("Flow rate (m³/h)")
-ax.legend()
-ax.grid(alpha=0.25)
-st.pyplot(fig)
-plt.close(fig)
+    # Durum gostergeleri
+    c1, c2, c3, c4 = st.columns(4)
 
-fig, ax = plt.subplots(figsize=(12, 4))
-ax.plot(timestamps, imbalance, label="24-hour imbalance indicator")
-ax.axhline(
-    warning_threshold,
-    linestyle="--",
-    label="Warning threshold"
-)
-ax.axhline(4.5, linestyle=":", label="Synthetic risk threshold")
-ax.set_ylabel("Indicator")
-ax.legend()
-ax.grid(alpha=0.25)
-st.pyplot(fig)
-plt.close(fig)
+    c1.metric("Sistem durumu", status)
+    c2.metric(
+        "Enjeksiyon debisi",
+        f"{row['injection']:.1f} m³/h",
+    )
+    c3.metric(
+        "Cekim debisi",
+        f"{row['extraction']:.1f} m³/h",
+    )
+    c4.metric(
+        "Dengesizlik gostergesi",
+        f"{current_imbalance:.2f}",
+        delta=f"Esik: {warning_threshold:.1f}",
+    )
 
-st.markdown("### Intervention comparison")
+    st.caption(
+        f"Simule edilen zaman: {row['timestamp']} | "
+        f"Kayit: {i + 1}/{len(df)}"
+    )
 
-baseline_total = positive_delta.sum()
-controlled_total = controlled_delta.sum()
+    # Belirgin, otomatik uyarı paneli
+    if pending:
+        remaining = max(
+            0,
+            int(
+                st.session_state.alert_deadline
+                - time.time()
+                + 0.99
+            ),
+        )
 
-m1, m2, m3 = st.columns(3)
-m1.metric("Baseline imbalance (synthetic m³)", f"{baseline_total:.1f}")
-m2.metric("Controlled imbalance (synthetic m³)", f"{controlled_total:.1f}")
+        st.error(
+            f"""
+            ## ⚠️ ERKEN UYARI: DENGESIZLIK ESIGI ASILDI
 
-reduction = (
-    100 * (1 - controlled_total / baseline_total)
-    if baseline_total > 0 else 0
-)
-m3.metric("Simulated reduction", f"{reduction:.1f}%")
+            **Uyari nedeni:** 24 saatlik pozitif debi farki
+            ortalamasi belirlenen esige ulasti veya asti.
 
-st.caption(
-    "The reduction is a result of the illustrative control rule in synthetic data. "
-    "It is not an estimate of real leakage or contamination reduction."
-)
+            **Olculen sentetik gosterge:** {current_imbalance:.2f}
 
-st.markdown("### Latest records")
-records = pd.DataFrame({
-    "Timestamp": timestamps,
-    "Injection (m³/h)": injection,
-    "Extraction (m³/h)": extraction,
-    "Imbalance indicator": imbalance,
-    "Synthetic risk condition": risk_condition,
-    "Intervention active": intervention
-})
-st.dataframe(records.tail(24), use_container_width=True)
+            **Esik:** {warning_threshold:.2f}
+
+            ### Sistemi simdi durduralim mi?
+
+            {remaining} saniye icinde yanit vermezsen
+            demo sistemi otomatik olarak durduracak.
+            """
+        )
+
+        left, right = st.columns(2)
+
+        with left:
+            st.button(
+                "🛑 Evet, sistemi durdur",
+                key="confirm_stop",
+                type="primary",
+                on_click=stop_system,
+                use_container_width=True,
+            )
+
+        with right:
+            st.button(
+                "Devam et, izlemeyi surdur",
+                key="confirm_continue",
+                on_click=continue_system,
+                use_container_width=True,
+            )
+
+    elif stopped:
+        st.error(
+            "## 🛑 SISTEM DURDURULDU\n\n"
+            + st.session_state.stop_reason
+        )
+
+        st.info(
+            "Bu demoda enjeksiyon ve cekim islemleri "
+            "durdurulmus kabul edilir. Gercek ekipman "
+            "kontrol edilmiyor."
+        )
+
+    elif risk_now:
+        st.warning(
+            "Esik asildi. Operator devam etmeyi secti; "
+            "gosterge izlenmeye devam ediyor. "
+            "Bu durum gercek bir sizinti tespiti degildir."
+        )
+
+    else:
+        st.success(
+            "Esik asimi yok. Sentetik veriler izleniyor."
+        )
+
+    if st.session_state.operator_decision:
+        st.caption(
+            "Son islem: "
+            + st.session_state.operator_decision
+        )
+
+    # --------------------------------------------------
+    # GRAFIKLER
+    # --------------------------------------------------
+
+    visible = df.iloc[max(0, i - 47): i + 1]
+
+    fig, ax = plt.subplots(figsize=(11, 4))
+
+    ax.plot(
+        visible["timestamp"],
+        visible["injection"],
+        label="Enjeksiyon (sentetik)",
+    )
+
+    ax.plot(
+        visible["timestamp"],
+        visible["extraction"],
+        label="Cekim (sentetik)",
+    )
+
+    # Durdurma gerceklesmisse etkin debileri sifirla.
+    if stopped and st.session_state.stop_index is not None:
+        stop_time = df.iloc[
+            st.session_state.stop_index
+        ]["timestamp"]
+
+        ax.axvline(
+            stop_time,
+            linestyle="--",
+            label="Simule durdurma zamani",
+        )
+
+    ax.set_title("Debi izleme")
+    ax.set_ylabel("Debi (m³/h)")
+    ax.legend()
+    ax.grid(alpha=0.25)
+    fig.autofmt_xdate()
+    st.pyplot(fig)
+    plt.close(fig)
+
+    fig2, ax2 = plt.subplots(figsize=(11, 4))
+
+    ax2.plot(
+        visible["timestamp"],
+        visible["imbalance"],
+        label="24 saatlik dengesizlik gostergesi",
+    )
+
+    ax2.axhline(
+        warning_threshold,
+        linestyle="--",
+        label="Uyari esigi",
+    )
+
+    ax2.set_title("Erken uyari gostergesi")
+    ax2.set_ylabel("Sentetik gosterge")
+    ax2.legend()
+    ax2.grid(alpha=0.25)
+    fig2.autofmt_xdate()
+    st.pyplot(fig2)
+    plt.close(fig2)
+
+    # Son kayitlar
+    with st.expander("Son sentetik kayitlari gor"):
+        st.dataframe(
+            visible.tail(12),
+            use_container_width=True,
+        )
+
+    st.caption(
+        "Not: Uyari, sentetik debi farki gostergesine "
+        "dayanir. Bu gosterge tek basina yer alti suyu "
+        "sizintisini kanitlamaz."
+    )
+
+
+live_monitor()
