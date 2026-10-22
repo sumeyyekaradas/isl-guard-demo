@@ -1,4 +1,3 @@
-
 import time
 import numpy as np
 import pandas as pd
@@ -448,7 +447,10 @@ with tabs[1]:
     peak_idx = int(np.argmax(tracer_concentration))
     peak_hour = float(tracer_time[peak_idx])
     peak_value = float(tracer_concentration[peak_idx])
-    area = float(np.trapz(tracer_concentration, tracer_time))
+    area = float(np.sum(
+    (tracer_concentration[:-1] + tracer_concentration[1:]) / 2
+    * np.diff(tracer_time)
+))
 
     detected = np.flatnonzero(tracer_concentration > 0.05)
     first_arrival = (
