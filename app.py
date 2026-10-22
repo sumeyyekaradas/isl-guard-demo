@@ -26,6 +26,47 @@ st.warning(
 
 st.sidebar.header("Sistem ayarlari")
 
+# ---------------- SAHA PROFİLLERİ ----------------
+
+site_profiles = {
+    "Saha A - Kararlı başlangıç": {
+        "description": "Başlangıç ölçümlerinin referans alındığı izleme senaryosu.",
+        "ph_reference_min": 6.5,
+        "ph_reference_max": 8.5,
+        "sulfate_reference": 250.0,
+        "scenario": "baseline"
+    },
+    "Saha B - Kimyasal değişime duyarlı": {
+        "description": "pH ve sülfat değişimlerinin yakından incelendiği senaryo.",
+        "ph_reference_min": 6.5,
+        "ph_reference_max": 8.5,
+        "sulfate_reference": 250.0,
+        "scenario": "chemical"
+    },
+    "Saha C - Hassas çevresel sınır": {
+        "description": "Sınır kuyularındaki değişimlere odaklanan senaryo.",
+        "ph_reference_min": 6.5,
+        "ph_reference_max": 8.5,
+        "sulfate_reference": 250.0,
+        "scenario": "boundary"
+    }
+}
+
+selected_site = st.sidebar.selectbox(
+    "İzlenecek saha profili",
+    list(site_profiles.keys())
+)
+
+site = site_profiles[selected_site]
+
+st.sidebar.caption(site["description"])
+
+st.sidebar.caption(
+    "pH 6,5–8,5 ve sülfat 250 mg/L değerleri "
+    "ABD EPA'nın ikincil içme suyu referanslarıdır; "
+    "ISL sahasına özgü güvenli çalışma sınırları değildir."
+)
+
 warning_threshold = st.sidebar.slider(
     "Erken uyari esigi",
     1.0, 6.0, 3.0, 0.5,
