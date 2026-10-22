@@ -106,7 +106,7 @@ def train_and_score(df: pd.DataFrame):
     model = IsolationForest(n_estimators=200, contamination=0.05, random_state=SEED)
     model.fit(baseline)
     anomaly_score = -model.decision_function(X)  # higher = more anomalous
-    cutoff = float(np.quantile(anomaly_score.iloc[:baseline_n], 0.95))
+    cutoff = float(np.quantile(anomaly_score[:baseline_n], 0.95))
     anomaly = (anomaly_score > cutoff).astype(int)
     return anomaly_score, anomaly, cutoff
 
@@ -154,9 +154,9 @@ df["demo_rule_alert"] = (
     | (df["boundary_sulfate_mg_l"] > sulfate_demo_threshold)
     | (df["gradient_proxy"] < gradient_demo_threshold)
 ).astype(int)
-df["ai_anomaly"] = anomaly_flag.to_numpy()
+df["ai_anomaly"] = anomaly_flag
 df["combined_alert"] = ((df["demo_rule_alert"] == 1) | (df["ai_anomaly"] == 1)).astype(int)
-df["anomaly_score"] = anomaly_score.to_numpy()
+df["anomaly_score"] = anomaly_score
 
 latest = df.iloc[-1]
 target_injection, recommendation = make_recommendation(
