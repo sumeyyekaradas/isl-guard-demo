@@ -1,0 +1,6 @@
+{
+  "name": "ISL Guard",
+  "description": "ISL madenciliği için sentetik veri tabanlı izleme ve karar destek prototipi",
+  "permissions": [],
+  "capabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
