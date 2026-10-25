@@ -22,6 +22,7 @@ import { SensorMonitoringView } from './views/SensorMonitoringView';
 import { RiskAnalysisView } from './views/RiskAnalysisView';
 import { InterventionSimulationView } from './views/InterventionSimulationView';
 import { BeforeAfterComparisonView } from './views/BeforeAfterComparisonView';
+import { TracerTestView } from './views/TracerTestView';
 import { DataExplorerView } from './views/DataExplorerView';
 import { MethodologyView } from './views/MethodologyView';
 import { AuthorizationModal } from './components/AuthorizationModal';
@@ -598,6 +599,10 @@ export const App: React.FC = () => {
               thresholds={thresholds}
               appliedAtDay={intervention.appliedAtDay}
             />
+          )}
+
+          {activeTab === 'tracer' && (
+            <TracerTestView wells={jsonConfig?.wells} />
           )}
 
           {activeTab === 'explorer' && (

@@ -9,7 +9,7 @@ import {
   BookOpen,
   X,
   Radio,
-  FileSpreadsheet,
+  FlaskConical,
 } from 'lucide-react';
 
 export type NavTab =
@@ -18,6 +18,7 @@ export type NavTab =
   | 'risk'
   | 'intervention'
   | 'comparison'
+  | 'tracer'
   | 'explorer'
   | 'methodology';
 
@@ -72,6 +73,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
       label: 'Before-and-After Comparison',
       icon: Scale,
       description: 'Deterministic Impact Metrics',
+    },
+    {
+      id: 'tracer' as NavTab,
+      label: 'Tracer Test',
+      icon: FlaskConical,
+      description: 'Breakthrough Curve & Pore Velocity',
     },
     {
       id: 'explorer' as NavTab,
