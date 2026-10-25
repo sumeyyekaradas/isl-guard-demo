@@ -170,7 +170,7 @@ function pathLength(x: number[], node: ITreeNode, currentDepth: number): number 
   }
 }
 
-class FastIsolationForest {
+export class FastIsolationForest {
   private trees: ITreeNode[] = [];
   private numTrees = 100;
   private subSampleSize: number = 256;

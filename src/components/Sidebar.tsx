@@ -60,7 +60,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       id: 'risk' as NavTab,
       label: 'Risk Analysis',
       icon: AlertOctagon,
-      description: 'Explainable Rule-Based Engine',
+      description: 'Isolation Forest ML & Rules',
     },
     {
       id: 'intervention' as NavTab,

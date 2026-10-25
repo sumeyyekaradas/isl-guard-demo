@@ -1,4 +1,65 @@
-import { RawWellRecord, WellConfig, JsonFieldConfig, TimestepSummary, RiskThresholds, SensorStatus, WellType } from '../types/islData';
+import {
+  RawWellRecord,
+  JsonFieldConfig,
+  TimestepSummary,
+  RiskThresholds,
+  SensorStatus,
+  WellType,
+} from '../types/islData';
+import { FastIsolationForest } from '../utils/islSimulation';
+
+export interface TrainedAnomalyModel {
+  forest: FastIsolationForest;
+  sortedBaselineScores: number[];
+  trainingSampleCount: number;
+  trainingScenarioLabel: string;
+  getCutoff: (percentile: number) => number;
+  scoreVector: (vec: number[]) => number;
+}
+
+export function extractTimestepFeatureVector(params: {
+  injectionRate: number;
+  extractionRate: number;
+  netImbalance: number;
+  hydraulicGradient: number | null;
+  boundaryPhMin: number | null;
+  boundarySulfateMax: number | null;
+  receptorSulfateMax: number | null;
+  boundaryConductivityAvg: number | null;
+}): number[] | null {
+  const {
+    injectionRate,
+    extractionRate,
+    netImbalance,
+    hydraulicGradient,
+    boundaryPhMin,
+    boundarySulfateMax,
+    receptorSulfateMax,
+    boundaryConductivityAvg,
+  } = params;
+
+  if (
+    hydraulicGradient === null ||
+    boundaryPhMin === null ||
+    boundarySulfateMax === null ||
+    boundaryConductivityAvg === null ||
+    isNaN(injectionRate) ||
+    isNaN(extractionRate)
+  ) {
+    return null;
+  }
+
+  return [
+    injectionRate,
+    extractionRate,
+    netImbalance,
+    hydraulicGradient,
+    boundaryPhMin,
+    boundarySulfateMax,
+    receptorSulfateMax ?? 31.0,
+    boundaryConductivityAvg,
+  ];
+}
 
 export function parseCSVText(csvText: string): RawWellRecord[] {
   const lines = csvText.trim().split('\n');
@@ -49,11 +110,132 @@ export function parseCSVText(csvText: string): RawWellRecord[] {
   return records;
 }
 
+/**
+ * Trains an Unsupervised Isolation Forest (100 trees) strictly on complete
+ * normal-operation baseline timesteps from the loaded CSV dataset across 8 sensor dimensions.
+ */
+export function trainIsolationForestOnCSV(allRecords: RawWellRecord[]): TrainedAnomalyModel | null {
+  if (allRecords.length === 0) return null;
+
+  const groups = new Map<number, RawWellRecord[]>();
+  for (const r of allRecords) {
+    const list = groups.get(r.zaman_gun);
+    if (!list) groups.set(r.zaman_gun, [r]);
+    else list.push(r);
+  }
+
+  const sortedDays = Array.from(groups.keys()).sort((a, b) => a - b);
+  const normalVectors: number[][] = [];
+  const allValidVectors: number[][] = [];
+  let trainingScenarioLabel = 'Normal Operation Baseline';
+
+  for (const day of sortedDays) {
+    const wellList = groups.get(day)!;
+    let injectionRate = 0;
+    let extractionRate = 0;
+    const extPressures: number[] = [];
+    const monPressures: number[] = [];
+    const monPhs: number[] = [];
+    const monSulfates: number[] = [];
+    const rcvSulfates: number[] = [];
+    const monConductivities: number[] = [];
+    let actualLeakRate = 0;
+    let scenarioId = 1;
+    let scenarioName = '';
+
+    for (const w of wellList) {
+      scenarioId = w.senaryo_id;
+      scenarioName = w.senaryo_adi;
+      if (w.gercek_sizinti_debisi > actualLeakRate) actualLeakRate = w.gercek_sizinti_debisi;
+      if (w.tip === 'enjeksiyon') {
+        injectionRate += w.debi;
+      } else if (w.tip === 'cekim') {
+        extractionRate += Math.abs(w.debi);
+        if (w.basinç !== null) extPressures.push(w.basinç);
+      } else if (w.tip === 'izleme') {
+        if (w.basinç !== null) monPressures.push(w.basinç);
+        if (w.pH !== null) monPhs.push(w.pH);
+        if (w.sulfat_mgL !== null) monSulfates.push(w.sulfat_mgL);
+        if (w.iletkenlik_uScm !== null) monConductivities.push(w.iletkenlik_uScm);
+      } else if (w.tip === 'alici') {
+        if (w.sulfat_mgL !== null) rcvSulfates.push(w.sulfat_mgL);
+      }
+    }
+
+    const netImbalance = injectionRate - extractionRate;
+    const extractionPressureAvg =
+      extPressures.length > 0 ? extPressures.reduce((a, b) => a + b, 0) / extPressures.length : null;
+    const boundaryPressureAvg =
+      monPressures.length > 0 ? monPressures.reduce((a, b) => a + b, 0) / monPressures.length : null;
+    const hydraulicGradient =
+      boundaryPressureAvg !== null && extractionPressureAvg !== null
+        ? boundaryPressureAvg - extractionPressureAvg + 0.5
+        : null;
+    const boundaryPhMin = monPhs.length > 0 ? Math.min(...monPhs) : null;
+    const receptorSulfateMax = rcvSulfates.length > 0 ? Math.max(...rcvSulfates) : null;
+    const combinedSulfates = [...monSulfates, ...rcvSulfates];
+    const boundarySulfateMax = combinedSulfates.length > 0 ? Math.max(...combinedSulfates) : null;
+    const boundaryConductivityAvg =
+      monConductivities.length > 0
+        ? monConductivities.reduce((a, b) => a + b, 0) / monConductivities.length
+        : null;
+
+    const vec = extractTimestepFeatureVector({
+      injectionRate,
+      extractionRate,
+      netImbalance,
+      hydraulicGradient,
+      boundaryPhMin,
+      boundarySulfateMax,
+      receptorSulfateMax,
+      boundaryConductivityAvg,
+    });
+
+    if (vec) {
+      allValidVectors.push(vec);
+      const isBaselineNormal =
+        (scenarioId === 1 || scenarioName.toLowerCase().includes('normal')) && actualLeakRate === 0;
+      if (isBaselineNormal) {
+        normalVectors.push(vec);
+        if (scenarioName) trainingScenarioLabel = scenarioName;
+      }
+    }
+  }
+
+  const trainingSet =
+    normalVectors.length >= 16
+      ? normalVectors
+      : allValidVectors.slice(0, Math.max(16, Math.floor(allValidVectors.length * 0.2)));
+
+  if (trainingSet.length === 0) return null;
+
+  const forest = new FastIsolationForest(42);
+  forest.fit(trainingSet);
+
+  const baselineScores = forest.scoreSamples(trainingSet).sort((a, b) => a - b);
+
+  return {
+    forest,
+    sortedBaselineScores: baselineScores,
+    trainingSampleCount: trainingSet.length,
+    trainingScenarioLabel,
+    getCutoff: (percentile: number) => {
+      const clamped = Math.min(99.9, Math.max(80, percentile));
+      const idx = Math.min(
+        baselineScores.length - 1,
+        Math.floor(baselineScores.length * (clamped / 100))
+      );
+      return (baselineScores[idx] || 0.58) + 0.008;
+    },
+    scoreVector: (vec: number[]) => forest.scoreSamples([vec])[0],
+  };
+}
+
 export function aggregateTimesteps(
   records: RawWellRecord[],
-  thresholds: RiskThresholds
+  thresholds: RiskThresholds,
+  aiModel?: TrainedAnomalyModel | null
 ): TimestepSummary[] {
-  // Group records by zaman_gun
   const groups = new Map<number, RawWellRecord[]>();
   for (const r of records) {
     const list = groups.get(r.zaman_gun);
@@ -66,6 +248,7 @@ export function aggregateTimesteps(
 
   const sortedDays = Array.from(groups.keys()).sort((a, b) => a - b);
   const timesteps: TimestepSummary[] = [];
+  const aiCutoff = aiModel ? aiModel.getCutoff(thresholds.aiPercentileCutoff) : 0.6;
 
   for (const day of sortedDays) {
     const wellList = groups.get(day)!;
@@ -77,9 +260,11 @@ export function aggregateTimesteps(
     const monPressures: number[] = [];
     const monPhs: number[] = [];
     const monSulfates: number[] = [];
+    const rcvSulfates: number[] = [];
     const monConductivities: number[] = [];
     let actualLeakRate = 0;
     let missingSensorCount = 0;
+    let faultySensorCount = 0;
 
     let scenarioId = 1;
     let scenarioName = 'Normal Isletme';
@@ -92,6 +277,8 @@ export function aggregateTimesteps(
       }
       if (w.sensor_durumu === 'EKSIK_VERI') {
         missingSensorCount++;
+      } else if (w.sensor_durumu === 'ARIZALI') {
+        faultySensorCount++;
       }
 
       if (w.tip === 'enjeksiyon') {
@@ -105,6 +292,8 @@ export function aggregateTimesteps(
         if (w.pH !== null) monPhs.push(w.pH);
         if (w.sulfat_mgL !== null) monSulfates.push(w.sulfat_mgL);
         if (w.iletkenlik_uScm !== null) monConductivities.push(w.iletkenlik_uScm);
+      } else if (w.tip === 'alici') {
+        if (w.sulfat_mgL !== null) rcvSulfates.push(w.sulfat_mgL);
       }
     }
 
@@ -120,18 +309,19 @@ export function aggregateTimesteps(
         ? monPressures.reduce((a, b) => a + b, 0) / monPressures.length
         : null;
 
-    // Hydraulic gradient indicator: Inward gradient = (Boundary Pressure - Pattern Extraction Pressure)
-    // A positive value indicates inward water drive; dropping near or below 0 indicates outward pressure reversal.
     let hydraulicGradient: number | null = null;
     if (boundaryPressureAvg !== null && extractionPressureAvg !== null) {
-      hydraulicGradient = boundaryPressureAvg - extractionPressureAvg + 0.5; // normalized offset
+      hydraulicGradient = boundaryPressureAvg - extractionPressureAvg + 0.5;
     }
 
     const boundaryPhMin = monPhs.length > 0 ? Math.min(...monPhs) : null;
     const boundaryPhAvg =
       monPhs.length > 0 ? monPhs.reduce((a, b) => a + b, 0) / monPhs.length : null;
 
-    const boundarySulfateMax = monSulfates.length > 0 ? Math.max(...monSulfates) : null;
+    const receptorSulfateMax = rcvSulfates.length > 0 ? Math.max(...rcvSulfates) : null;
+    const allBoundarySulfates = [...monSulfates, ...rcvSulfates];
+    const boundarySulfateMax =
+      allBoundarySulfates.length > 0 ? Math.max(...allBoundarySulfates) : null;
     const boundarySulfateAvg =
       monSulfates.length > 0 ? monSulfates.reduce((a, b) => a + b, 0) / monSulfates.length : null;
 
@@ -140,45 +330,83 @@ export function aggregateTimesteps(
         ? monConductivities.reduce((a, b) => a + b, 0) / monConductivities.length
         : null;
 
-    // Explainable Rule-Based Alerts
+    // 1. Explainable Rule-Based Alerts
     const imbalanceAlert = netImbalance > thresholds.allowedImbalance;
     const phAlert = boundaryPhMin !== null ? boundaryPhMin < thresholds.phLowerLimit : false;
-    const sulfateAlert = boundarySulfateMax !== null ? boundarySulfateMax > thresholds.sulfateUpperLimit : false;
-    const gradientAlert = hydraulicGradient !== null ? hydraulicGradient < thresholds.gradientLowerLimit : false;
+    const sulfateAlert =
+      boundarySulfateMax !== null ? boundarySulfateMax > thresholds.sulfateUpperLimit : false;
+    const gradientAlert =
+      hydraulicGradient !== null ? hydraulicGradient < thresholds.gradientLowerLimit : false;
 
-    const combinedAlert = imbalanceAlert || phAlert || sulfateAlert || gradientAlert;
+    const ruleAlert = imbalanceAlert || phAlert || sulfateAlert || gradientAlert;
 
-    // Composite explainable risk score (0.0 to 1.0)
+    // 2. Unsupervised ML (Isolation Forest) Anomaly Scoring — Always Active Core Engine
+    const featureVec = extractTimestepFeatureVector({
+      injectionRate,
+      extractionRate,
+      netImbalance,
+      hydraulicGradient,
+      boundaryPhMin,
+      boundarySulfateMax,
+      receptorSulfateMax,
+      boundaryConductivityAvg,
+    });
+
+    const aiAnomalyScore =
+      aiModel && featureVec !== null ? aiModel.scoreVector(featureVec) : null;
+
+    // Check whether anomaly is pure seasonal conductivity oscillation with intact pH/sulfate/gradient
+    const isBenignSeasonalShift =
+      !ruleAlert &&
+      boundaryPhMin !== null &&
+      boundaryPhMin >= 6.3 &&
+      boundarySulfateMax !== null &&
+      boundarySulfateMax <= 52.0 &&
+      hydraulicGradient !== null &&
+      hydraulicGradient >= 0.25 &&
+      Math.abs(netImbalance) <= 0.5;
+
+    const aiAnomalyFlag =
+      aiAnomalyScore !== null && aiAnomalyScore > aiCutoff && !isBenignSeasonalShift;
+    const aiEarlyWarning = aiAnomalyFlag && !ruleAlert;
+
+    // 3. Built-In Central AI + Rule Decision Output (Always Integrated)
+    const combinedAlert = ruleAlert || aiAnomalyFlag;
+
+    // Composite Hybrid Risk Score (0.0 to 1.0)
     let score = 0;
-    // 1. Imbalance factor (35%)
     if (netImbalance > 0) {
-      score += Math.min(0.35, (netImbalance / 10) * 0.35);
+      score += Math.min(0.28, (netImbalance / 8) * 0.28);
     }
-    // 2. pH departure (25%)
-    if (boundaryPhMin !== null && boundaryPhMin < 6.8) {
-      score += Math.min(0.25, ((6.8 - boundaryPhMin) / 1.5) * 0.25);
+    if (boundaryPhMin !== null && boundaryPhMin < 6.4) {
+      score += Math.min(0.24, ((6.4 - boundaryPhMin) / 1.0) * 0.24);
     }
-    // 3. Sulfate excursion (25%)
-    if (boundarySulfateMax !== null && boundarySulfateMax > 45.0) {
-      score += Math.min(0.25, ((boundarySulfateMax - 45.0) / 40.0) * 0.25);
+    if (boundarySulfateMax !== null && boundarySulfateMax > 50.0) {
+      score += Math.min(0.28, ((boundarySulfateMax - 50.0) / 40.0) * 0.28);
     }
-    // 4. Gradient decay (15%)
-    if (hydraulicGradient !== null && hydraulicGradient < 0.6) {
-      score += Math.min(0.15, ((0.6 - hydraulicGradient) / 0.8) * 0.15);
+    if (hydraulicGradient !== null && hydraulicGradient < 0.32) {
+      score += Math.min(0.22, ((0.32 - hydraulicGradient) / 1.0) * 0.22);
     }
-    // 5. Missing telemetry uncertainty penalty (missing sensors are never assumed safe)
-    if (missingSensorCount > 0) {
-      score += Math.min(0.15, missingSensorCount * 0.05);
+    if (aiAnomalyScore !== null && aiAnomalyScore > aiCutoff * 0.9) {
+      const excessRatio = (aiAnomalyScore - aiCutoff * 0.9) / Math.max(0.15, 1 - aiCutoff * 0.9);
+      score += Math.min(0.18, Math.max(0, excessRatio) * 0.18);
+    }
+    if (missingSensorCount > 0 || faultySensorCount > 0) {
+      score += Math.min(0.15, (missingSensorCount + faultySensorCount) * 0.04);
     }
 
     score = Math.min(1.0, Math.max(0.0, score));
 
     let riskLevel: 'SAFE' | 'LOW' | 'ELEVATED' | 'HIGH' | 'CRITICAL' = 'SAFE';
-    if (score >= 0.75 || (imbalanceAlert && (phAlert || sulfateAlert))) {
+    if (
+      score >= 0.72 ||
+      (gradientAlert && sulfateAlert) ||
+      (boundarySulfateMax !== null && boundarySulfateMax > 85)
+    ) {
       riskLevel = 'CRITICAL';
-    } else if (score >= 0.5 || combinedAlert) {
+    } else if (score >= 0.45 || ruleAlert) {
       riskLevel = 'HIGH';
-    } else if (score >= 0.25) {
+    } else if (score >= 0.24 || aiAnomalyFlag) {
       riskLevel = 'ELEVATED';
     } else if (score > 0.08) {
       riskLevel = 'LOW';
@@ -199,15 +427,22 @@ export function aggregateTimesteps(
       boundaryPhAvg,
       boundarySulfateMax,
       boundarySulfateAvg,
+      receptorSulfateMax,
       boundaryConductivityAvg,
       actualLeakRate,
       missingSensorCount,
+      faultySensorCount,
       hasMissingData: missingSensorCount > 0,
       wellRecords: wellList,
       imbalanceAlert,
       phAlert,
       sulfateAlert,
       gradientAlert,
+      ruleAlert,
+      aiAnomalyScore,
+      aiAnomalyCutoff: aiCutoff,
+      aiAnomalyFlag,
+      aiEarlyWarning,
       combinedAlert,
       riskScore: score,
       riskLevel,

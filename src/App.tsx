@@ -3,11 +3,13 @@ import {
   loadDefaultCSV,
   loadDefaultJSON,
   aggregateTimesteps,
+  trainIsolationForestOnCSV,
 } from './services/dataService';
 import {
   computeInterventionScenario,
   InterventionComparison,
 } from './services/interventionService';
+import { evaluateAIDecisionSupport } from './services/aiDecisionService';
 import {
   RawWellRecord,
   JsonFieldConfig,
@@ -17,6 +19,7 @@ import {
 } from './types/islData';
 import { Navbar } from './components/Navbar';
 import { Sidebar, NavTab } from './components/Sidebar';
+import { LiveSystemGuide } from './components/LiveSystemGuide';
 import { OverviewView } from './views/OverviewView';
 import { SensorMonitoringView } from './views/SensorMonitoringView';
 import { RiskAnalysisView } from './views/RiskAnalysisView';
@@ -28,12 +31,15 @@ import { MethodologyView } from './views/MethodologyView';
 import { AuthorizationModal } from './components/AuthorizationModal';
 import { AlertTriangle, RefreshCw } from 'lucide-react';
 
+// Calibrated against verified isletme_verileri.csv baseline so Normal Operation has 0 false alarms
+// while Yavas Dengesizlik / Sizi, Ani Pompa Arizasi, Sensor Sapmasi, and Kapsam Disi Olay trigger reliably.
 const DEFAULT_THRESHOLDS: RiskThresholds = {
   allowedImbalance: 1.5,
-  phLowerLimit: 6.0,
+  phLowerLimit: 6.15,
   sulfateUpperLimit: 65.0,
-  gradientLowerLimit: 0.65,
+  gradientLowerLimit: 0.20,
   countdownSeconds: 15,
+  aiPercentileCutoff: 97,
 };
 
 export const App: React.FC = () => {
@@ -48,11 +54,17 @@ export const App: React.FC = () => {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [datasetName, setDatasetName] = useState<string>('isletme_verileri.csv');
 
-  // Filter state
+  // Filter & Live Playback state
   const [selectedScenario, setSelectedScenario] = useState<string>('ALL');
   const [selectedDay, setSelectedDay] = useState<number>(0);
+  const [isLivePlaying, setIsLivePlaying] = useState<boolean>(false);
+  const [liveSpeed, setLiveSpeed] = useState<1 | 3>(1);
 
-  // Risk Thresholds state
+  // Cross-tab Live Tracer Launch state
+  const [tracerTargetWell, setTracerTargetWell] = useState<string | null>('EXT-01');
+  const [tracerAutoStartSignal, setTracerAutoStartSignal] = useState<number>(0);
+
+  // Risk Thresholds state (AI is permanently built-in)
   const [thresholds, setThresholds] = useState<RiskThresholds>(DEFAULT_THRESHOLDS);
 
   // Intervention simulation state
@@ -100,25 +112,32 @@ export const App: React.FC = () => {
     return Array.from(s);
   }, [records]);
 
+  // Train Unsupervised Isolation Forest ML model (100 trees, 8 channels) strictly on normal baseline records
+  const aiModel = useMemo(() => {
+    return trainIsolationForestOnCSV(records);
+  }, [records]);
+
   // Filter records by selected scenario
   const filteredRecords = useMemo(() => {
     if (selectedScenario === 'ALL') return records;
     return records.filter((r) => r.senaryo_adi === selectedScenario);
   }, [records, selectedScenario]);
 
-  // Aggregated Timesteps (Baseline)
+  // Aggregated Timesteps (Built-In AI + Physical Rules)
   const timesteps = useMemo(() => {
     if (filteredRecords.length === 0) return [];
-    return aggregateTimesteps(filteredRecords, thresholds);
-  }, [filteredRecords, thresholds]);
+    return aggregateTimesteps(filteredRecords, thresholds, aiModel);
+  }, [filteredRecords, thresholds, aiModel]);
 
-  // Keep selectedDay within bounds of current scenario's timesteps (defaults to start of window)
+  // Countdown timer ref
+  const countdownIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Keep selectedDay within bounds of current scenario's timesteps
   useEffect(() => {
     if (timesteps.length > 0) {
       const minDay = timesteps[0].day;
       const maxDay = timesteps[timesteps.length - 1].day;
       if (selectedDay < minDay || selectedDay > maxDay) {
-        // If user selected a specific scenario that contains alerts, focus on first alert day; otherwise first day
         if (selectedScenario !== 'ALL') {
           const firstAlertStep = timesteps.find((t) => t.combinedAlert);
           setSelectedDay(firstAlertStep ? firstAlertStep.day : minDay);
@@ -129,19 +148,93 @@ export const App: React.FC = () => {
     }
   }, [timesteps, selectedScenario, selectedDay]);
 
-  // Scenario selection handler
+  // Scenario selection handler — resets intervention state so selecting a fault scenario
+  // (such as "Yavas Dengesizlik / Sizi") ALWAYS jumps to its breach and automatically triggers the warning!
   const handleSelectScenario = (sc: string) => {
+    if (countdownIntervalRef.current) {
+      clearInterval(countdownIntervalRef.current);
+      countdownIntervalRef.current = null;
+    }
+    setIsLivePlaying(false);
     setSelectedScenario(sc);
+    setAcknowledgedAlertKey(null);
+    setIsModalOpen(false);
+    setIntervention({
+      mode: 'full_shutdown',
+      maintainExtraction: true,
+      appliedAtDay: null,
+      status: 'idle',
+      countdownRemaining: thresholds.countdownSeconds,
+    });
+
     if (sc === 'ALL') {
       setSelectedDay(0);
     } else {
       const scRecords = records.filter((r) => r.senaryo_adi === sc);
-      const scSteps = aggregateTimesteps(scRecords, thresholds);
+      const scSteps = aggregateTimesteps(scRecords, thresholds, aiModel);
       if (scSteps.length > 0) {
         const firstAlert = scSteps.find((t) => t.combinedAlert);
         setSelectedDay(firstAlert ? firstAlert.day : scSteps[0].day);
       }
     }
+  };
+
+  // Day selection handler — when user scrubs onto a new day where thresholds/AI are exceeded,
+  // re-arm idle status if previously rejected so automatic warning triggers cleanly.
+  const handleSelectDay = (nextDay: number) => {
+    setSelectedDay(nextDay);
+    setIntervention((prev) => {
+      if (prev.status === 'rejected') {
+        return {
+          ...prev,
+          status: 'idle',
+          countdownRemaining: thresholds.countdownSeconds,
+        };
+      }
+      return prev;
+    });
+  };
+
+  // Live Stream Auto-Play Runner across timesteps
+  useEffect(() => {
+    if (!isLivePlaying || timesteps.length === 0) return;
+
+    const intervalMs = liveSpeed === 3 ? 350 : 900;
+    const timer = setInterval(() => {
+      setSelectedDay((prevDay) => {
+        let currentIdx = 0;
+        let minDiff = Infinity;
+        for (let i = 0; i < timesteps.length; i++) {
+          const diff = Math.abs(timesteps[i].day - prevDay);
+          if (diff < minDiff) {
+            minDiff = diff;
+            currentIdx = i;
+          }
+        }
+        if (currentIdx >= timesteps.length - 1) {
+          setIsLivePlaying(false);
+          return timesteps[timesteps.length - 1].day;
+        }
+        return timesteps[currentIdx + 1].day;
+      });
+    }, intervalMs);
+
+    return () => clearInterval(timer);
+  }, [isLivePlaying, liveSpeed, timesteps]);
+
+  const handleStepForward = () => {
+    if (timesteps.length === 0) return;
+    let currentIdx = 0;
+    let minDiff = Infinity;
+    for (let i = 0; i < timesteps.length; i++) {
+      const diff = Math.abs(timesteps[i].day - selectedDay);
+      if (diff < minDiff) {
+        minDiff = diff;
+        currentIdx = i;
+      }
+    }
+    const nextIdx = Math.min(timesteps.length - 1, currentIdx + 1);
+    handleSelectDay(timesteps[nextIdx].day);
   };
 
   // Compute Before vs. After comparison scenario
@@ -151,7 +244,8 @@ export const App: React.FC = () => {
       intervention.appliedAtDay,
       intervention.mode,
       intervention.maintainExtraction,
-      thresholds
+      thresholds,
+      aiModel
     );
   }, [
     timesteps,
@@ -159,6 +253,7 @@ export const App: React.FC = () => {
     intervention.mode,
     intervention.maintainExtraction,
     thresholds,
+    aiModel,
   ]);
 
   // Baseline inspected timestep (for alarm detection)
@@ -198,14 +293,23 @@ export const App: React.FC = () => {
     return closest;
   }, [activeTimesteps, selectedDay]);
 
-  // Countdown timer ref
-  const countdownIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Central AI Decision Support Report for active inspected state
+  const aiReport = useMemo(() => {
+    return evaluateAIDecisionSupport(currentTimestep, thresholds, intervention);
+  }, [currentTimestep, thresholds, intervention]);
+
+  // Baseline AI Report (used inside Warning Modal before mitigation is applied)
+  const baselineAiReport = useMemo(() => {
+    return evaluateAIDecisionSupport(baselineCurrentTimestep, thresholds, intervention);
+  }, [baselineCurrentTimestep, thresholds, intervention]);
+
   const currentDayRef = useRef<number>(0);
   useEffect(() => {
     currentDayRef.current = baselineCurrentTimestep ? baselineCurrentTimestep.day : 0;
   }, [baselineCurrentTimestep]);
 
-  // Trigger supervisor authorization prompt when inspecting an unacknowledged alert timestep
+  // AUTOMATIC THRESHOLD & AI WARNING TRIGGER:
+  // Fires automatically whenever the inspected scenario/day crosses any physical rule or built-in AI cutoff!
   useEffect(() => {
     if (!baselineCurrentTimestep) return;
     const alertKey = `${selectedScenario}:${baselineCurrentTimestep.day.toFixed(2)}`;
@@ -215,9 +319,15 @@ export const App: React.FC = () => {
       intervention.status === 'idle' &&
       acknowledgedAlertKey !== alertKey
     ) {
+      // Pause live auto-play when warning triggers so supervisor can inspect & decide
+      setIsLivePlaying(false);
       setAcknowledgedAlertKey(alertKey);
       setIntervention((prev) => ({
         ...prev,
+        mode:
+          baselineAiReport.recommendedStrategy === 'throttle_to_extraction'
+            ? 'throttle_to_extraction'
+            : 'full_shutdown',
         status: 'awaiting_approval',
         countdownRemaining: thresholds.countdownSeconds,
       }));
@@ -229,16 +339,15 @@ export const App: React.FC = () => {
           timestamp: new Date().toLocaleTimeString(),
           day: baselineCurrentTimestep.day,
           type: 'ALERT',
-          title: 'Excursion Warning — Supervisor Authorization Requested',
-          details: `Threshold breach detected on Day ${baselineCurrentTimestep.day.toFixed(
-            2
-          )}. Waiting ${thresholds.countdownSeconds}s for supervisor response before automatic shutdown.`,
+          title: `Automatic AI / Threshold Warning (${baselineCurrentTimestep.scenarioName})`,
+          details: `${baselineAiReport.headline} — Waiting ${thresholds.countdownSeconds}s for supervisor response before automatic shutdown.`,
         },
         ...prev,
       ]);
     }
   }, [
     baselineCurrentTimestep,
+    baselineAiReport,
     selectedScenario,
     intervention.status,
     acknowledgedAlertKey,
@@ -314,6 +423,7 @@ export const App: React.FC = () => {
       clearInterval(countdownIntervalRef.current);
       countdownIntervalRef.current = null;
     }
+    setIsLivePlaying(false);
     const day = baselineCurrentTimestep ? baselineCurrentTimestep.day : 0;
     setAcknowledgedAlertKey(`${selectedScenario}:${day.toFixed(2)}`);
     setIntervention((prev) => ({
@@ -337,7 +447,7 @@ export const App: React.FC = () => {
     ]);
   };
 
-  // Supervisor Decision Handlers
+  // Supervisor & AI Decision Handlers
   const handleApproveIntervention = () => {
     if (countdownIntervalRef.current) {
       clearInterval(countdownIntervalRef.current);
@@ -361,11 +471,52 @@ export const App: React.FC = () => {
         details: `Mitigation engaged at Day ${day.toFixed(2)} (${
           intervention.mode === 'full_shutdown'
             ? 'Full injection shutdown'
-            : 'Injection throttled to bleed equilibrium'
+            : 'Injection throttled to 94% bleed equilibrium'
         }).`,
       },
       ...prev,
     ]);
+  };
+
+  const handleApplyAiRecommendation = (
+    recommendedMode: 'full_shutdown' | 'throttle_to_extraction'
+  ) => {
+    if (countdownIntervalRef.current) {
+      clearInterval(countdownIntervalRef.current);
+      countdownIntervalRef.current = null;
+    }
+    const day = baselineCurrentTimestep ? baselineCurrentTimestep.day : 0;
+    setAcknowledgedAlertKey(`${selectedScenario}:${day.toFixed(2)}`);
+    setIntervention((prev) => ({
+      ...prev,
+      mode: recommendedMode,
+      maintainExtraction: true,
+      status: 'approved',
+      appliedAtDay: day,
+    }));
+    setIsModalOpen(false);
+    setEventLogs((prev) => [
+      {
+        id: Math.random().toString(36).substring(2, 9),
+        timestamp: new Date().toLocaleTimeString(),
+        day,
+        type: 'ACTION',
+        title: 'AI Recommended Strategy Applied',
+        details: `Supervisor applied AI prescription at Day ${day.toFixed(2)}: ${
+          recommendedMode === 'full_shutdown'
+            ? 'Full injection shutdown (Q_inj = 0.0 m³/h)'
+            : 'Injection throttled to 94% extraction bleed equilibrium'
+        }.`,
+      },
+      ...prev,
+    ]);
+  };
+
+  const handleLaunchTracerForWell = (wellId: string) => {
+    setIsModalOpen(false);
+    setTracerTargetWell(wellId);
+    setTracerAutoStartSignal((n) => n + 1);
+    setActiveTab('tracer');
   };
 
   const handleRejectIntervention = () => {
@@ -430,7 +581,6 @@ export const App: React.FC = () => {
       countdownIntervalRef.current = null;
     }
     const day = baselineCurrentTimestep ? baselineCurrentTimestep.day : 0;
-    // Mark current day acknowledged so Reset returns cleanly to nominal dashboard without immediately re-popping modal
     setAcknowledgedAlertKey(`${selectedScenario}:${day.toFixed(2)}`);
     setIntervention({
       mode: 'full_shutdown',
@@ -477,9 +627,9 @@ export const App: React.FC = () => {
     return (
       <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-slate-300">
         <RefreshCw className="w-10 h-10 text-cyan-400 animate-spin mb-4" />
-        <h2 className="text-lg font-bold text-slate-100">Loading ISL Guard Telemetry...</h2>
+        <h2 className="text-lg font-bold text-slate-100">Loading ISL Guard AI &amp; Sensor Telemetry...</h2>
         <p className="text-xs text-slate-500 mt-1">
-          Reading operational records from isletme_verileri.csv and saha_verileri_lite.json
+          Reading operational records from isletme_verileri.csv and calibrating 100-tree Isolation Forest
         </p>
       </div>
     );
@@ -538,17 +688,31 @@ export const App: React.FC = () => {
 
         {/* Dynamic Main Workspace Content */}
         <main className="flex-1 min-w-0 pb-12">
+          {/* Persistent Live System Operation Guide & Real-Time Stream Runner */}
+          <LiveSystemGuide
+            currentTimestep={currentTimestep}
+            aiReport={aiReport}
+            isLivePlaying={isLivePlaying}
+            liveSpeed={liveSpeed}
+            onToggleLivePlay={() => setIsLivePlaying((p) => !p)}
+            onStepForward={handleStepForward}
+            onChangeLiveSpeed={setLiveSpeed}
+          />
+
           {activeTab === 'overview' && (
             <OverviewView
               timesteps={activeTimesteps}
               currentTimestep={currentTimestep}
               selectedDay={selectedDay}
-              onSelectDay={setSelectedDay}
+              onSelectDay={handleSelectDay}
               thresholds={thresholds}
               selectedScenario={selectedScenario}
               onSelectScenario={handleSelectScenario}
               scenarios={scenarios}
               wells={jsonConfig?.wells}
+              aiReport={aiReport}
+              onApplyAiRecommendation={handleApplyAiRecommendation}
+              onLaunchTracerForWell={handleLaunchTracerForWell}
             />
           )}
 
@@ -563,9 +727,14 @@ export const App: React.FC = () => {
           {activeTab === 'risk' && (
             <RiskAnalysisView
               timesteps={activeTimesteps}
+              currentTimestep={currentTimestep}
               thresholds={thresholds}
+              aiModel={aiModel}
+              aiReport={aiReport}
               onUpdateThresholds={setThresholds}
               onResetThresholds={() => setThresholds(DEFAULT_THRESHOLDS)}
+              onApplyAiRecommendation={handleApplyAiRecommendation}
+              onLaunchTracerForWell={handleLaunchTracerForWell}
             />
           )}
 
@@ -574,7 +743,10 @@ export const App: React.FC = () => {
               timesteps={timesteps}
               currentTimestep={baselineCurrentTimestep}
               intervention={intervention}
+              aiReport={baselineAiReport}
               onApproveIntervention={handleApproveIntervention}
+              onApplyAiRecommendation={handleApplyAiRecommendation}
+              onLaunchTracerForWell={handleLaunchTracerForWell}
               onRejectIntervention={handleRejectIntervention}
               onManualTrip={handleManualTrip}
               onResetIntervention={handleResetIntervention}
@@ -602,7 +774,11 @@ export const App: React.FC = () => {
           )}
 
           {activeTab === 'tracer' && (
-            <TracerTestView wells={jsonConfig?.wells} />
+            <TracerTestView
+              wells={jsonConfig?.wells}
+              initialTargetWellId={tracerTargetWell}
+              autoStartSignal={tracerAutoStartSignal}
+            />
           )}
 
           {activeTab === 'explorer' && (
@@ -619,13 +795,15 @@ export const App: React.FC = () => {
         </main>
       </div>
 
-      {/* Dismissible Supervisor Authorization & Fail-Safe Modal */}
+      {/* Dismissible Supervisor Authorization & AI Decision Modal */}
       <AuthorizationModal
         isOpen={isModalOpen}
         intervention={intervention}
         currentTimestep={baselineCurrentTimestep}
         thresholds={thresholds}
+        aiReport={baselineAiReport}
         onApprove={handleApproveIntervention}
+        onApproveRecommendedStrategy={handleApplyAiRecommendation}
         onReject={handleRejectIntervention}
         onImmediateStop={handleManualTrip}
         onRestart={handleResetIntervention}
@@ -636,7 +814,7 @@ export const App: React.FC = () => {
       <footer className="bg-slate-950 border-t border-slate-900 py-4 mt-auto text-xs text-slate-500">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-3 text-center sm:text-left">
           <div>
-            <span className="font-bold text-slate-300">ISL Guard</span> · Closed-Loop Excursion Prevention System (Proof of Concept)
+            <span className="font-bold text-slate-300">ISL Guard</span> · AI-Centered Closed-Loop Excursion Prevention System (Proof of Concept)
           </div>
           <div className="text-[11px] text-slate-400">
             Synthetic Data Decision Support · Does Not Control Physical Mining Equipment

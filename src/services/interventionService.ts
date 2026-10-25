@@ -1,10 +1,12 @@
 import { TimestepSummary, RiskThresholds } from '../types/islData';
+import { TrainedAnomalyModel, extractTimestepFeatureVector } from './dataService';
 
 export interface InterventionComparison {
   before: {
     phExceedanceHours: number;
     sulfateExceedanceHours: number;
     imbalanceExceedanceHours: number;
+    aiAnomalyHours: number;
     riskyHours: number;
     totalPositiveImbalanceM3: number;
     averageRiskScore: number;
@@ -14,6 +16,7 @@ export interface InterventionComparison {
     phExceedanceHours: number;
     sulfateExceedanceHours: number;
     imbalanceExceedanceHours: number;
+    aiAnomalyHours: number;
     riskyHours: number;
     totalPositiveImbalanceM3: number;
     averageRiskScore: number;
@@ -25,6 +28,7 @@ export interface InterventionComparison {
     imbalanceVolumeReductionM3: number;
     phExceedanceReduction: number;
     sulfateExceedanceReduction: number;
+    aiAnomalyHoursReduction: number;
   };
   simulatedTimesteps: TimestepSummary[];
 }
@@ -34,14 +38,17 @@ export function computeInterventionScenario(
   appliedAtDay: number | null,
   strategy: 'throttle_to_extraction' | 'full_shutdown',
   maintainExtraction: boolean,
-  thresholds: RiskThresholds
+  thresholds: RiskThresholds,
+  aiModel?: TrainedAnomalyModel | null
 ): InterventionComparison {
   const stepDurationHours = 6; // 0.25 days per record
+  const aiCutoff = aiModel ? aiModel.getCutoff(thresholds.aiPercentileCutoff) : 0.6;
 
   // 1. Calculate BEFORE metrics
   let beforePhExceedHours = 0;
   let beforeSulfateExceedHours = 0;
   let beforeImbalanceExceedHours = 0;
+  let beforeAiAnomalyHours = 0;
   let beforeRiskyHours = 0;
   let beforePositiveImbalanceVolume = 0;
   let beforeRiskScoreSum = 0;
@@ -51,6 +58,7 @@ export function computeInterventionScenario(
     if (t.phAlert) beforePhExceedHours += stepDurationHours;
     if (t.sulfateAlert) beforeSulfateExceedHours += stepDurationHours;
     if (t.imbalanceAlert) beforeImbalanceExceedHours += stepDurationHours;
+    if (t.aiAnomalyFlag) beforeAiAnomalyHours += stepDurationHours;
     if (t.combinedAlert) {
       beforeRiskyHours += stepDurationHours;
       beforeInterventions++;
@@ -69,12 +77,11 @@ export function computeInterventionScenario(
   let afterPhExceedHours = 0;
   let afterSulfateExceedHours = 0;
   let afterImbalanceExceedHours = 0;
+  let afterAiAnomalyHours = 0;
   let afterRiskyHours = 0;
   let afterPositiveImbalanceVolume = 0;
   let afterRiskScoreSum = 0;
-  let afterInterventions = 0;
 
-  // Recovery decay kinetics (as inward cone pulls water back)
   let recoveryHoursElapsed = 0;
 
   for (const t of timesteps) {
@@ -85,14 +92,11 @@ export function computeInterventionScenario(
 
     if (isPostIntervention) {
       recoveryHoursElapsed += stepDurationHours;
-      afterInterventions++;
 
-      // Action: throttle or shutdown injection
       if (strategy === 'full_shutdown') {
         injectionRate = 0;
       } else {
-        // Throttle to match extraction or below allowed imbalance
-        injectionRate = Math.min(t.injectionRate, t.extractionRate * 0.98); // 2% bleed
+        injectionRate = Math.min(t.injectionRate, t.extractionRate * 0.94);
       }
 
       if (!maintainExtraction) {
@@ -102,63 +106,122 @@ export function computeInterventionScenario(
 
     const netImbalance = injectionRate - extractionRate;
 
-    // Chemical recovery simulation over time if inward gradient maintained
     let boundaryPhMin = t.boundaryPhMin;
     let boundarySulfateMax = t.boundarySulfateMax;
+    let receptorSulfateMax = t.receptorSulfateMax;
     let hydraulicGradient = t.hydraulicGradient;
+    let boundaryConductivityAvg = t.boundaryConductivityAvg;
 
     if (isPostIntervention && maintainExtraction && recoveryHoursElapsed > 0) {
-      // Inward drawdown restores hydraulic gradient
       if (hydraulicGradient !== null) {
-        hydraulicGradient = Math.min(1.2, hydraulicGradient + 0.05 * Math.min(recoveryHoursElapsed / 24, 10));
+        hydraulicGradient = Math.min(
+          0.65,
+          hydraulicGradient + 0.12 * Math.min(recoveryHoursElapsed / 24, 10)
+        );
       }
-      // pH recovers back towards ~6.6
-      if (boundaryPhMin !== null && boundaryPhMin < 6.5) {
-        const phDeficit = 6.5 - boundaryPhMin;
-        const recovered = phDeficit * Math.min(1.0, recoveryHoursElapsed / (48)); // recovers over 48h
-        boundaryPhMin = Math.min(6.5, boundaryPhMin + recovered);
+      if (boundaryPhMin !== null && boundaryPhMin < 6.48) {
+        const phDeficit = 6.48 - boundaryPhMin;
+        const recovered = phDeficit * Math.min(1.0, recoveryHoursElapsed / 36);
+        boundaryPhMin = Math.min(6.48, boundaryPhMin + recovered);
       }
-      // Sulfate flushes back down towards baseline ~45 mg/L
-      if (boundarySulfateMax !== null && boundarySulfateMax > 45) {
-        const excess = boundarySulfateMax - 45;
-        const flushed = excess * Math.min(1.0, recoveryHoursElapsed / (72)); // flushes over 72h
-        boundarySulfateMax = Math.max(45, boundarySulfateMax - flushed);
+      if (boundarySulfateMax !== null && boundarySulfateMax > 46) {
+        const excess = boundarySulfateMax - 46;
+        const flushed = excess * Math.min(1.0, recoveryHoursElapsed / 48);
+        boundarySulfateMax = Math.max(46, boundarySulfateMax - flushed);
+      }
+      if (receptorSulfateMax !== null && receptorSulfateMax > 31) {
+        const excessRcv = receptorSulfateMax - 31;
+        const flushedRcv = excessRcv * Math.min(1.0, recoveryHoursElapsed / 48);
+        receptorSulfateMax = Math.max(31, receptorSulfateMax - flushedRcv);
+      }
+      if (boundaryConductivityAvg !== null && boundaryConductivityAvg > 515) {
+        const excessCond = boundaryConductivityAvg - 515;
+        const flushedCond = excessCond * Math.min(1.0, recoveryHoursElapsed / 48);
+        boundaryConductivityAvg = Math.max(515, boundaryConductivityAvg - flushedCond);
       }
     }
 
-    // Recompute alerts
+    // Recompute Rule Alerts
     const imbalanceAlert = netImbalance > thresholds.allowedImbalance;
     const phAlert = boundaryPhMin !== null ? boundaryPhMin < thresholds.phLowerLimit : false;
-    const sulfateAlert = boundarySulfateMax !== null ? boundarySulfateMax > thresholds.sulfateUpperLimit : false;
-    const gradientAlert = hydraulicGradient !== null ? hydraulicGradient < thresholds.gradientLowerLimit : false;
-    const combinedAlert = imbalanceAlert || phAlert || sulfateAlert || gradientAlert;
+    const sulfateAlert =
+      boundarySulfateMax !== null ? boundarySulfateMax > thresholds.sulfateUpperLimit : false;
+    const gradientAlert =
+      hydraulicGradient !== null ? hydraulicGradient < thresholds.gradientLowerLimit : false;
+    const ruleAlert = imbalanceAlert || phAlert || sulfateAlert || gradientAlert;
 
-    // Recompute score
+    // Recompute AI Isolation Forest Score on post-intervention state
+    const evalInj = isPostIntervention ? Math.min(50, extractionRate) : injectionRate;
+    const evalImb = evalInj - extractionRate;
+    const featureVec = extractTimestepFeatureVector({
+      injectionRate: evalInj,
+      extractionRate,
+      netImbalance: evalImb,
+      hydraulicGradient,
+      boundaryPhMin,
+      boundarySulfateMax,
+      receptorSulfateMax,
+      boundaryConductivityAvg,
+    });
+
+    const aiAnomalyScore =
+      aiModel && featureVec !== null ? aiModel.scoreVector(featureVec) : t.aiAnomalyScore;
+
+    const isBenignPostRecovery =
+      !ruleAlert &&
+      boundaryPhMin !== null &&
+      boundaryPhMin >= 6.3 &&
+      boundarySulfateMax !== null &&
+      boundarySulfateMax <= 52.0 &&
+      hydraulicGradient !== null &&
+      hydraulicGradient >= 0.25 &&
+      netImbalance <= 0.5;
+
+    const aiAnomalyFlag =
+      aiAnomalyScore !== null && aiAnomalyScore > aiCutoff && !isBenignPostRecovery;
+    const aiEarlyWarning = aiAnomalyFlag && !ruleAlert;
+
+    const combinedAlert = ruleAlert || aiAnomalyFlag;
+
     let score = 0;
-    if (netImbalance > 0) score += Math.min(0.35, (netImbalance / 10) * 0.35);
-    if (boundaryPhMin !== null && boundaryPhMin < 6.8) {
-      score += Math.min(0.25, ((6.8 - boundaryPhMin) / 1.5) * 0.25);
+    if (netImbalance > 0) score += Math.min(0.28, (netImbalance / 8) * 0.28);
+    if (boundaryPhMin !== null && boundaryPhMin < 6.4) {
+      score += Math.min(0.24, ((6.4 - boundaryPhMin) / 1.0) * 0.24);
     }
-    if (boundarySulfateMax !== null && boundarySulfateMax > 45.0) {
-      score += Math.min(0.25, ((boundarySulfateMax - 45.0) / 40.0) * 0.25);
+    if (boundarySulfateMax !== null && boundarySulfateMax > 50.0) {
+      score += Math.min(0.28, ((boundarySulfateMax - 50.0) / 40.0) * 0.28);
     }
-    if (hydraulicGradient !== null && hydraulicGradient < 0.6) {
-      score += Math.min(0.15, ((0.6 - hydraulicGradient) / 0.8) * 0.15);
+    if (hydraulicGradient !== null && hydraulicGradient < 0.32) {
+      score += Math.min(0.22, ((0.32 - hydraulicGradient) / 1.0) * 0.22);
     }
-    if (t.missingSensorCount > 0) {
-      score += Math.min(0.15, t.missingSensorCount * 0.05);
+    if (aiAnomalyScore !== null && aiAnomalyScore > aiCutoff * 0.9) {
+      const excessRatio = (aiAnomalyScore - aiCutoff * 0.9) / Math.max(0.15, 1 - aiCutoff * 0.9);
+      score += Math.min(0.18, Math.max(0, excessRatio) * 0.18);
+    }
+    if (t.missingSensorCount > 0 || t.faultySensorCount > 0) {
+      score += Math.min(0.15, (t.missingSensorCount + t.faultySensorCount) * 0.04);
     }
     score = Math.min(1.0, Math.max(0.0, score));
 
     let riskLevel: 'SAFE' | 'LOW' | 'ELEVATED' | 'HIGH' | 'CRITICAL' = 'SAFE';
-    if (score >= 0.75 || (imbalanceAlert && (phAlert || sulfateAlert))) riskLevel = 'CRITICAL';
-    else if (score >= 0.5 || combinedAlert) riskLevel = 'HIGH';
-    else if (score >= 0.25) riskLevel = 'ELEVATED';
-    else if (score > 0.08) riskLevel = 'LOW';
+    if (
+      score >= 0.72 ||
+      (gradientAlert && sulfateAlert) ||
+      (boundarySulfateMax !== null && boundarySulfateMax > 85)
+    ) {
+      riskLevel = 'CRITICAL';
+    } else if (score >= 0.45 || ruleAlert) {
+      riskLevel = 'HIGH';
+    } else if (score >= 0.24 || aiAnomalyFlag) {
+      riskLevel = 'ELEVATED';
+    } else if (score > 0.08) {
+      riskLevel = 'LOW';
+    }
 
     if (phAlert) afterPhExceedHours += stepDurationHours;
     if (sulfateAlert) afterSulfateExceedHours += stepDurationHours;
     if (imbalanceAlert) afterImbalanceExceedHours += stepDurationHours;
+    if (aiAnomalyFlag) afterAiAnomalyHours += stepDurationHours;
     if (combinedAlert) afterRiskyHours += stepDurationHours;
     if (netImbalance > 0) afterPositiveImbalanceVolume += netImbalance * stepDurationHours;
     afterRiskScoreSum += score;
@@ -170,11 +233,18 @@ export function computeInterventionScenario(
       netImbalance,
       boundaryPhMin,
       boundarySulfateMax,
+      receptorSulfateMax,
+      boundaryConductivityAvg,
       hydraulicGradient,
       imbalanceAlert,
       phAlert,
       sulfateAlert,
       gradientAlert,
+      ruleAlert,
+      aiAnomalyScore,
+      aiAnomalyCutoff: aiCutoff,
+      aiAnomalyFlag,
+      aiEarlyWarning,
       combinedAlert,
       riskScore: score,
       riskLevel,
@@ -192,6 +262,7 @@ export function computeInterventionScenario(
       phExceedanceHours: beforePhExceedHours,
       sulfateExceedanceHours: beforeSulfateExceedHours,
       imbalanceExceedanceHours: beforeImbalanceExceedHours,
+      aiAnomalyHours: beforeAiAnomalyHours,
       riskyHours: beforeRiskyHours,
       totalPositiveImbalanceM3: beforePositiveImbalanceVolume,
       averageRiskScore: beforeAvgRisk,
@@ -201,6 +272,7 @@ export function computeInterventionScenario(
       phExceedanceHours: afterPhExceedHours,
       sulfateExceedanceHours: afterSulfateExceedHours,
       imbalanceExceedanceHours: afterImbalanceExceedHours,
+      aiAnomalyHours: afterAiAnomalyHours,
       riskyHours: afterRiskyHours,
       totalPositiveImbalanceM3: afterPositiveImbalanceVolume,
       averageRiskScore: afterAvgRisk,
@@ -212,6 +284,7 @@ export function computeInterventionScenario(
       imbalanceVolumeReductionM3: volReduction,
       phExceedanceReduction: Math.max(0, beforePhExceedHours - afterPhExceedHours),
       sulfateExceedanceReduction: Math.max(0, beforeSulfateExceedHours - afterSulfateExceedHours),
+      aiAnomalyHoursReduction: Math.max(0, beforeAiAnomalyHours - afterAiAnomalyHours),
     },
     simulatedTimesteps,
   };

@@ -12,13 +12,18 @@ import {
 } from 'lucide-react';
 import { TimestepSummary, InterventionConfig, RiskThresholds, LogEntry } from '../types/islData';
 import { InterventionComparison } from '../services/interventionService';
+import { AIDecisionReport } from '../services/aiDecisionService';
 import { EngineeringChart } from '../components/EngineeringChart';
+import { AIDecisionCenterCard } from '../components/AIDecisionCenterCard';
 
 interface InterventionSimulationViewProps {
   timesteps: TimestepSummary[];
   currentTimestep: TimestepSummary | null;
   intervention: InterventionConfig;
+  aiReport: AIDecisionReport;
   onApproveIntervention: () => void;
+  onApplyAiRecommendation: (strategy: 'full_shutdown' | 'throttle_to_extraction') => void;
+  onLaunchTracerForWell: (wellId: string) => void;
   onRejectIntervention: () => void;
   onManualTrip: () => void;
   onResetIntervention: () => void;
@@ -35,7 +40,10 @@ export const InterventionSimulationView: React.FC<InterventionSimulationViewProp
   timesteps,
   currentTimestep,
   intervention,
+  aiReport,
   onApproveIntervention,
+  onApplyAiRecommendation,
+  onLaunchTracerForWell,
   onRejectIntervention,
   onManualTrip,
   onResetIntervention,
@@ -65,10 +73,10 @@ export const InterventionSimulationView: React.FC<InterventionSimulationViewProp
         <div>
           <h2 className="text-xl font-black text-slate-100 flex items-center gap-2">
             <Sliders className="w-6 h-6 text-cyan-400" />
-            Intervention Simulation &amp; Fail-Safe Control
+            Closed-Loop Intervention Simulation &amp; Fail-Safe Control
           </h2>
           <p className="text-xs text-slate-400 mt-1">
-            When an excursion warning triggers, supervisor authorization is requested. If no response arrives before timeout, injection automatically shuts down.
+            Driven by built-in AI Decision Support: when thresholds or AI bounds break, supervisor approval is requested and unanswered warnings auto-halt injection.
           </p>
         </div>
 
@@ -80,7 +88,7 @@ export const InterventionSimulationView: React.FC<InterventionSimulationViewProp
               className="px-3.5 py-2 rounded-xl bg-amber-500/15 border border-amber-500/50 text-amber-300 hover:bg-amber-500/25 text-xs font-bold transition-colors flex items-center gap-1.5 cursor-pointer"
             >
               <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
-              <span>Simulate Warning &amp; Supervisor Prompt</span>
+              <span>Test Warning &amp; Countdown</span>
             </button>
           )}
 
@@ -96,6 +104,14 @@ export const InterventionSimulationView: React.FC<InterventionSimulationViewProp
           )}
         </div>
       </div>
+
+      {/* Central AI Decision Support & Recommended Control Prescription */}
+      <AIDecisionCenterCard
+        currentTimestep={latest || null}
+        aiReport={aiReport}
+        onApplyRecommendation={onApplyAiRecommendation}
+        onLaunchTracerForWell={onLaunchTracerForWell}
+      />
 
       {/* Operator Intervention Control Box */}
       <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-4">
@@ -135,8 +151,8 @@ export const InterventionSimulationView: React.FC<InterventionSimulationViewProp
                     SUPERVISOR AUTHORIZATION REQUESTED — EXCURSION RISK WARNING
                   </h4>
                   <p className="text-xs text-amber-300/85 mt-0.5">
-                    Inspected Day {latest ? latest.day.toFixed(2) : '0.00'} · Flow imbalance:{' '}
-                    {latest ? latest.netImbalance.toFixed(1) : '0.0'} m³/h (Demo limit: {thresholds.allowedImbalance} m³/h).
+                    Inspected Day {latest ? latest.day.toFixed(2) : '0.00'} ({latest?.scenarioName}) · Max Sulfate:{' '}
+                    {latest?.boundarySulfateMax?.toFixed(1) ?? 'N/A'} mg/L (Limit ≤ {thresholds.sulfateUpperLimit} mg/L).
                     If unanswered before countdown expires, injection automatically stops (Q_inj = 0 m³/h).
                   </p>
                 </div>
@@ -160,7 +176,7 @@ export const InterventionSimulationView: React.FC<InterventionSimulationViewProp
                 className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-black text-xs transition-colors cursor-pointer"
               >
                 <CheckCircle className="w-4 h-4" />
-                Approve Intervention
+                Approve Selected Strategy
               </button>
 
               <button
@@ -194,7 +210,7 @@ export const InterventionSimulationView: React.FC<InterventionSimulationViewProp
                 </div>
                 <div className="text-xs text-emerald-300/85 mt-0.5">
                   Applied from Day {intervention.appliedAtDay !== null ? intervention.appliedAtDay.toFixed(2) : '0.00'} ·
-                  Injection: <strong>{intervention.mode === 'full_shutdown' ? 'Stopped (0.0 m³/h)' : 'Throttled to Extraction Bleed'}</strong> ·
+                  Injection: <strong>{intervention.mode === 'full_shutdown' ? 'Stopped (0.0 m³/h)' : 'Throttled to 94% Extraction Bleed'}</strong> ·
                   Extraction: <strong>{intervention.maintainExtraction ? 'Continued (Inward Capture Cone)' : 'Stopped'}</strong>.
                 </div>
               </div>
@@ -213,7 +229,7 @@ export const InterventionSimulationView: React.FC<InterventionSimulationViewProp
             <span>
               {intervention.status === 'rejected'
                 ? 'Supervisor manually overrode the active warning; baseline pumping continues.'
-                : 'No active warning on the currently inspected timestamp. Scrub to a risky day or click "Simulate Warning" to test the approval countdown.'}
+                : 'No active warning on the currently inspected timestamp. Switch Scenario (e.g. Yavas Dengesizlik / Sizi) or run Live Stream to trigger automatic threshold alerts.'}
             </span>
             <button
               type="button"
@@ -250,7 +266,7 @@ export const InterventionSimulationView: React.FC<InterventionSimulationViewProp
                   onChange={() => onSelectStrategy('throttle_to_extraction')}
                   className="accent-cyan-400"
                 />
-                <span>Throttle Injection Below Extraction Rate (98% Bleed Equilibrium)</span>
+                <span>Throttle Injection Below Extraction Rate (94% Bleed Equilibrium)</span>
               </label>
             </div>
           </div>
@@ -271,7 +287,7 @@ export const InterventionSimulationView: React.FC<InterventionSimulationViewProp
                   Continue Extraction Pumping After Injection Cutback
                 </span>
                 <p className="text-[11px] text-slate-400 mt-1">
-                  Scenario assumption: Maintaining recovery pumping while injection is halted or throttled generates an inward hydraulic sink to recapture migrating lixiviant. Toggle off to compare simultaneous full-field shutdown.
+                  Maintaining recovery pumping while injection is halted or throttled generates an inward hydraulic sink to recapture migrating lixiviant.
                 </p>
               </div>
             </label>
@@ -306,7 +322,7 @@ export const InterventionSimulationView: React.FC<InterventionSimulationViewProp
         />
 
         <EngineeringChart
-          title="Recalculated Risk Score Trajectory"
+          title="Recalculated AI + Rule Risk Score Trajectory"
           subtitle="Comparing baseline risk (rose) against post-intervention simulated risk (emerald)"
           xLabels={dayLabels}
           xAxisTitle="Timeline (Days)"
@@ -329,8 +345,8 @@ export const InterventionSimulationView: React.FC<InterventionSimulationViewProp
           ]}
           thresholds={[
             {
-              value: 0.5,
-              label: 'Warning Reference (0.50)',
+              value: 0.45,
+              label: 'High Risk Reference (0.45)',
               color: '#ef4444',
               dash: '4 4',
             },
@@ -350,7 +366,7 @@ export const InterventionSimulationView: React.FC<InterventionSimulationViewProp
       {/* Operator Protocol Event Log */}
       <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 shadow-xl">
         <h3 className="text-sm font-bold text-slate-100 mb-3">
-          Chronological Supervisor &amp; Fail-Safe Audit Log
+          Chronological Supervisor, AI &amp; Fail-Safe Audit Log
         </h3>
         {eventLogs.length > 0 ? (
           <div className="overflow-x-auto max-h-60 border border-slate-800 rounded-xl">

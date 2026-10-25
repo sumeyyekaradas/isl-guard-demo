@@ -12,8 +12,10 @@ import {
   Clock,
 } from 'lucide-react';
 import { TimestepSummary, RiskThresholds, WellConfig } from '../types/islData';
+import { AIDecisionReport } from '../services/aiDecisionService';
 import { EngineeringChart } from '../components/EngineeringChart';
 import { WellfieldMap } from '../components/WellfieldMap';
+import { AIDecisionCenterCard } from '../components/AIDecisionCenterCard';
 
 interface OverviewViewProps {
   timesteps: TimestepSummary[];
@@ -25,6 +27,9 @@ interface OverviewViewProps {
   onSelectScenario: (sc: string) => void;
   scenarios: string[];
   wells?: WellConfig[];
+  aiReport: AIDecisionReport;
+  onApplyAiRecommendation: (strategy: 'full_shutdown' | 'throttle_to_extraction') => void;
+  onLaunchTracerForWell: (wellId: string) => void;
 }
 
 export const OverviewView: React.FC<OverviewViewProps> = ({
@@ -37,6 +42,9 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
   onSelectScenario,
   scenarios,
   wells,
+  aiReport,
+  onApplyAiRecommendation,
+  onLaunchTracerForWell,
 }) => {
   const minDay = timesteps.length > 0 ? timesteps[0].day : 0;
   const maxDay = timesteps.length > 0 ? timesteps[timesteps.length - 1].day : 180;
@@ -56,7 +64,10 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
     return filtered.length > 0 ? filtered : timesteps;
   }, [timesteps, windowStart, windowEnd]);
 
-  const latest = currentTimestep || windowedTimesteps[windowedTimesteps.length - 1] || timesteps[timesteps.length - 1];
+  const latest =
+    currentTimestep ||
+    windowedTimesteps[windowedTimesteps.length - 1] ||
+    timesteps[timesteps.length - 1];
 
   if (!latest) {
     return (
@@ -75,6 +86,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
   const phSeries = windowedTimesteps.map((t) => t.boundaryPhMin);
   const sulfateSeries = windowedTimesteps.map((t) => t.boundarySulfateMax);
   const riskSeries = windowedTimesteps.map((t) => t.riskScore);
+  const aiScoreSeries = windowedTimesteps.map((t) => t.aiAnomalyScore);
 
   const renderRiskStatus = (level: string) => {
     switch (level) {
@@ -123,10 +135,10 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
           <div>
             <h2 className="text-xl font-black text-slate-100 flex items-center gap-2">
               <Activity className="w-6 h-6 text-cyan-400" />
-              Operational Overview
+              Operational Command &amp; AI Surveillance Overview
             </h2>
             <p className="text-xs text-slate-400 mt-1">
-              Real-time KPI surveillance and chronologically sorted time-series computed directly from field CSV telemetry.
+              Select any operational scenario (e.g. <span className="text-cyan-300 font-semibold">Yavas Dengesizlik / Sizi</span>) or scrub days — when thresholds or AI bounds are exceeded, supervisor authorization triggers automatically.
             </p>
           </div>
 
@@ -159,7 +171,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
             <div className="flex items-center justify-between">
               <span className="text-slate-300 font-semibold flex items-center gap-1.5">
                 <Calendar className="w-3.5 h-3.5 text-cyan-400" />
-                Inspected Timestamp (Updates KPI Cards &amp; Alarm Check):
+                Inspected Timestamp (Auto-Checks AI &amp; Threshold Limits):
               </span>
               <span className="font-mono font-bold text-cyan-300">
                 Day {latest.day.toFixed(2)} ({latest.scenarioName})
@@ -219,6 +231,14 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Central AI Decision Support & Sensor Intelligence Hub */}
+      <AIDecisionCenterCard
+        currentTimestep={latest}
+        aiReport={aiReport}
+        onApplyRecommendation={onApplyAiRecommendation}
+        onLaunchTracerForWell={onLaunchTracerForWell}
+      />
 
       {/* 6 Required KPI Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3.5">
@@ -304,14 +324,14 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
             )}
           </div>
           <div className="mt-2 text-[11px] text-slate-400">
-            Demo Limit: &ge; {thresholds.phLowerLimit.toFixed(1)}
+            Limit: &ge; {thresholds.phLowerLimit.toFixed(2)}
           </div>
         </div>
 
         {/* 5. Boundary Sulfate */}
         <div className="bg-slate-900/90 border border-slate-800/90 rounded-2xl p-4 shadow-lg">
           <div className="flex items-center justify-between text-xs text-slate-400">
-            <span>Boundary Sulfate</span>
+            <span>Boundary / RCV Sulfate</span>
             <ArrowUpRight className="w-4 h-4 text-purple-400" />
           </div>
           <div className="mt-2 flex items-baseline gap-1.5">
@@ -331,18 +351,18 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
             )}
           </div>
           <div className="mt-2 text-[11px] text-slate-400">
-            Demo Limit: &le; {thresholds.sulfateUpperLimit.toFixed(0)} mg/L
+            Limit: &le; {thresholds.sulfateUpperLimit.toFixed(0)} mg/L
           </div>
         </div>
 
         {/* 6. Current Risk Status */}
         <div className="bg-slate-900/90 border border-slate-800/90 rounded-2xl p-4 shadow-lg flex flex-col justify-between">
-          <div className="text-xs text-slate-400">Current Risk Status</div>
+          <div className="text-xs text-slate-400">AI + Rule Risk Status</div>
           <div className="my-2">{renderRiskStatus(latest.riskLevel)}</div>
           <div className="text-[11px] text-slate-400 flex items-center justify-between">
-            <span>Composite Score:</span>
-            <span className="font-mono font-bold text-slate-200">
-              {(latest.riskScore * 100).toFixed(0)}%
+            <span>Risk: {(latest.riskScore * 100).toFixed(0)}%</span>
+            <span className="font-mono text-cyan-400">
+              AI: {latest.aiAnomalyScore !== null ? latest.aiAnomalyScore.toFixed(2) : 'N/A'}
             </span>
           </div>
         </div>
@@ -390,8 +410,8 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
         />
 
         <EngineeringChart
-          title="Boundary Water Chemistry (pH & Sulfate)"
-          subtitle="Minimum pH and maximum sulfate across the 12 perimeter monitoring ring wells"
+          title="Boundary & Receptor Water Chemistry (pH & Sulfate)"
+          subtitle="Minimum pH and maximum sulfate across monitoring ring (MON-01..12) and distant receptors (RCV-01..03)"
           xLabels={dayLabels}
           xAxisTitle="Timeline (Days)"
           yAxisTitle="pH / Sulfate (mg/L)"
@@ -404,7 +424,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
               unit: 'pH',
             },
             {
-              name: 'Boundary Sulfate (Max)',
+              name: 'Boundary & Receptor Sulfate (Max)',
               color: '#a855f7',
               strokeWidth: 2,
               data: sulfateSeries,
@@ -455,26 +475,32 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
         />
 
         <EngineeringChart
-          title="Explainable Rule-Based Risk Score"
-          subtitle="Deterministic index combining imbalance, pH departure, sulfate spike, gradient decay, and missing telemetry"
+          title="Built-In Isolation Forest AI & Composite Risk Score"
+          subtitle="Combining 8-channel Isolation Forest anomaly score (cyan) with deterministic containment rules (rose)"
           xLabels={dayLabels}
           xAxisTitle="Timeline (Days)"
-          yAxisTitle="Risk Score (0 - 1)"
+          yAxisTitle="Score (0 - 1)"
           yMin={0}
           yMax={1}
           series={[
             {
-              name: 'Risk Score',
+              name: 'Composite Risk Score',
               color: '#f43f5e',
               strokeWidth: 2,
               data: riskSeries,
             },
+            {
+              name: 'Isolation Forest AI Score',
+              color: '#22d3ee',
+              strokeWidth: 1.5,
+              data: aiScoreSeries,
+            },
           ]}
           thresholds={[
             {
-              value: 0.5,
-              label: 'Warning Reference (0.50)',
-              color: '#ef4444',
+              value: Number(latest.aiAnomalyCutoff.toFixed(3)),
+              label: 'AI Anomaly Cutoff',
+              color: '#f59e0b',
               dash: '4 4',
             },
           ]}

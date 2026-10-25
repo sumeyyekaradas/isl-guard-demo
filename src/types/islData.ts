@@ -1,6 +1,6 @@
 export type WellType = 'enjeksiyon' | 'cekim' | 'izleme' | 'alici';
 
-export type SensorStatus = 'NORMAL' | 'EKSIK_VERI';
+export type SensorStatus = 'NORMAL' | 'EKSIK_VERI' | 'ARIZALI';
 
 export interface RawWellRecord {
   zaman_gun: number;
@@ -49,32 +49,42 @@ export interface TimestepSummary {
   injectionPressure: number | null;
   extractionPressureAvg: number | null;
   boundaryPressureAvg: number | null;
-  hydraulicGradient: number | null; // (Boundary Pressure - Pattern Pressure) or gradient proxy
+  hydraulicGradient: number | null;
   boundaryPhMin: number | null;
   boundaryPhAvg: number | null;
   boundarySulfateMax: number | null;
   boundarySulfateAvg: number | null;
+  receptorSulfateMax: number | null; // RCV-01..03 outer receptor max sulfate (mg/L)
   boundaryConductivityAvg: number | null;
   actualLeakRate: number; // Synthetic ground-truth excursion flow (m³/h)
   missingSensorCount: number;
+  faultySensorCount: number;
   hasMissingData: boolean;
   wellRecords: RawWellRecord[];
-  // Risk fields computed dynamically
+  // Explainable Rule-Based Alerts
   imbalanceAlert: boolean;
   phAlert: boolean;
   sulfateAlert: boolean;
   gradientAlert: boolean;
+  ruleAlert: boolean;
+  // Unsupervised ML (Isolation Forest) Anomaly Detection — Built-in Core Engine
+  aiAnomalyScore: number | null;
+  aiAnomalyCutoff: number;
+  aiAnomalyFlag: boolean;
+  aiEarlyWarning: boolean; // True when AI flags multivariate drift before any hard rule limit breaks
+  // Integrated AI + Rule Decision Output
   combinedAlert: boolean;
   riskScore: number; // 0.0 to 1.0
   riskLevel: RiskLevel;
 }
 
 export interface RiskThresholds {
-  allowedImbalance: number; // m³/h (e.g. 1.5)
-  phLowerLimit: number; // pH (e.g. 6.0)
-  sulfateUpperLimit: number; // mg/L (e.g. 65.0)
-  gradientLowerLimit: number; // (e.g. 0.0 or 0.65)
+  allowedImbalance: number; // m³/h (default 1.5)
+  phLowerLimit: number; // pH (default 6.15)
+  sulfateUpperLimit: number; // mg/L (default 65.0)
+  gradientLowerLimit: number; // ΔP proxy (default 0.20)
   countdownSeconds: number; // default 15s
+  aiPercentileCutoff: number; // default 97 (90% - 99%)
 }
 
 export interface InterventionConfig {

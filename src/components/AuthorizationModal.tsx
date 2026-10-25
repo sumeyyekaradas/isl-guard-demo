@@ -11,15 +11,19 @@ import {
   VolumeX,
   X,
   ArrowLeft,
+  Cpu,
 } from 'lucide-react';
 import { TimestepSummary, InterventionConfig, RiskThresholds } from '../types/islData';
+import { AIDecisionReport } from '../services/aiDecisionService';
 
 interface AuthorizationModalProps {
   isOpen: boolean;
   intervention: InterventionConfig;
   currentTimestep: TimestepSummary | null;
   thresholds: RiskThresholds;
+  aiReport: AIDecisionReport;
   onApprove: () => void;
+  onApproveRecommendedStrategy: (strategy: 'full_shutdown' | 'throttle_to_extraction') => void;
   onReject: () => void;
   onImmediateStop: () => void;
   onRestart: () => void;
@@ -31,7 +35,9 @@ export const AuthorizationModal: React.FC<AuthorizationModalProps> = ({
   intervention,
   currentTimestep,
   thresholds,
+  aiReport,
   onApprove,
+  onApproveRecommendedStrategy,
   onReject,
   onImmediateStop,
   onRestart,
@@ -102,6 +108,11 @@ export const AuthorizationModal: React.FC<AuthorizationModalProps> = ({
     Math.min(100, (intervention.countdownRemaining / Math.max(thresholds.countdownSeconds, 1)) * 100)
   );
 
+  const recommendedMode: 'full_shutdown' | 'throttle_to_extraction' =
+    aiReport.recommendedStrategy === 'throttle_to_extraction'
+      ? 'throttle_to_extraction'
+      : 'full_shutdown';
+
   return (
     <div
       role="dialog"
@@ -109,10 +120,10 @@ export const AuthorizationModal: React.FC<AuthorizationModalProps> = ({
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm overflow-y-auto"
     >
       <div
-        className={`w-full max-w-2xl bg-slate-900 border-2 rounded-2xl shadow-2xl overflow-hidden transition-all ${
+        className={`w-full max-w-2xl bg-slate-900 border-2 rounded-2xl shadow-2xl overflow-hidden transition-all my-auto ${
           isAutoTripped
             ? 'border-red-600'
             : isAwaitingApproval
@@ -145,7 +156,7 @@ export const AuthorizationModal: React.FC<AuthorizationModalProps> = ({
                 {isAutoTripped
                   ? 'Fail-Safe Auto-Stop Engaged — Injection Halted'
                   : isAwaitingApproval
-                  ? 'Supervisor Authorization Required — Excursion Warning'
+                  ? 'Automatic Threshold / AI Warning — Supervisor Authorization'
                   : isApproved
                   ? 'Intervention Approved — Mitigation Active'
                   : 'Supervisor Override Recorded'}
@@ -153,7 +164,7 @@ export const AuthorizationModal: React.FC<AuthorizationModalProps> = ({
               <p className="text-xs text-white/85 mt-0.5">
                 {isAutoTripped
                   ? 'No supervisor response within countdown window; injection stopped automatically.'
-                  : 'Excursion risk detected. Authorize shutdown now, or injection will stop automatically on timeout.'}
+                  : 'Safety threshold or AI anomaly limit crossed! Authorize mitigation or injection stops automatically on timeout.'}
               </p>
             </div>
           </div>
@@ -183,12 +194,33 @@ export const AuthorizationModal: React.FC<AuthorizationModalProps> = ({
         </div>
 
         {/* Content Body */}
-        <div className="p-5 sm:p-6 space-y-5 text-slate-200 text-sm">
+        <div className="p-5 sm:p-6 space-y-4 text-slate-200 text-sm">
+          {/* AI Diagnosis & Recommendation Box */}
+          <div className="bg-cyan-950/35 border border-cyan-800/70 rounded-xl p-4 space-y-2 text-xs">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <span className="font-black text-cyan-300 uppercase tracking-wide flex items-center gap-1.5">
+                <Cpu className="w-4 h-4 text-cyan-400" />
+                AI Decision Support Diagnosis
+              </span>
+              {currentTimestep && (
+                <span className="font-mono text-cyan-400 font-bold">
+                  AI Score: {currentTimestep.aiAnomalyScore?.toFixed(3) ?? 'N/A'} /{' '}
+                  {currentTimestep.aiAnomalyCutoff.toFixed(3)}
+                </span>
+              )}
+            </div>
+            <div className="font-bold text-slate-100 text-sm">{aiReport.headline}</div>
+            <p className="text-slate-300 leading-relaxed">{aiReport.summaryExplanation}</p>
+            <div className="pt-1 text-emerald-300 font-semibold">
+              AI Recommended Prescription: {aiReport.recommendedStrategyLabel}
+            </div>
+          </div>
+
           {/* Telemetry Snapshot */}
-          <div className="bg-slate-950/90 p-4 rounded-xl border border-slate-800 space-y-2.5">
+          <div className="bg-slate-950/90 p-3.5 rounded-xl border border-slate-800 space-y-2">
             <div className="flex items-center justify-between text-xs text-slate-400">
               <span className="font-semibold uppercase tracking-wider">
-                Triggering Telemetry Snapshot
+                Triggering Sensor Snapshot
               </span>
               {currentTimestep && (
                 <span className="font-mono text-cyan-400">
@@ -196,36 +228,50 @@ export const AuthorizationModal: React.FC<AuthorizationModalProps> = ({
                 </span>
               )}
             </div>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs font-mono">
-              <div className="bg-slate-900 p-2.5 rounded-lg border border-slate-800">
-                <span className="text-slate-500 block font-sans">Injection Rate</span>
-                <span className="font-bold text-cyan-400 text-sm">
-                  {currentTimestep ? currentTimestep.injectionRate.toFixed(1) : '0.0'} m³/h
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs font-mono">
+              <div className="bg-slate-900 p-2 rounded-lg border border-slate-800">
+                <span className="text-slate-500 block font-sans">Gradient Proxy</span>
+                <span
+                  className={`font-bold text-sm ${
+                    currentTimestep?.gradientAlert ? 'text-red-400' : 'text-cyan-400'
+                  }`}
+                >
+                  {currentTimestep?.hydraulicGradient !== null &&
+                  currentTimestep?.hydraulicGradient !== undefined
+                    ? currentTimestep.hydraulicGradient.toFixed(2)
+                    : 'MISSING'}
                 </span>
               </div>
-              <div className="bg-slate-900 p-2.5 rounded-lg border border-slate-800">
-                <span className="text-slate-500 block font-sans">Flow Imbalance</span>
-                <span className="font-bold text-rose-400 text-sm">
-                  {currentTimestep
-                    ? `${currentTimestep.netImbalance >= 0 ? '+' : ''}${currentTimestep.netImbalance.toFixed(2)}`
-                    : '0.00'}{' '}
-                  m³/h
-                </span>
-              </div>
-              <div className="bg-slate-900 p-2.5 rounded-lg border border-slate-800">
+              <div className="bg-slate-900 p-2 rounded-lg border border-slate-800">
                 <span className="text-slate-500 block font-sans">Boundary pH (Min)</span>
-                <span className="font-bold text-amber-400 text-sm">
-                  {currentTimestep?.boundaryPhMin !== null && currentTimestep?.boundaryPhMin !== undefined
+                <span
+                  className={`font-bold text-sm ${
+                    currentTimestep?.phAlert ? 'text-red-400' : 'text-amber-400'
+                  }`}
+                >
+                  {currentTimestep?.boundaryPhMin !== null &&
+                  currentTimestep?.boundaryPhMin !== undefined
                     ? currentTimestep.boundaryPhMin.toFixed(2)
                     : 'MISSING'}
                 </span>
               </div>
-              <div className="bg-slate-900 p-2.5 rounded-lg border border-slate-800">
-                <span className="text-slate-500 block font-sans">Boundary Sulfate</span>
-                <span className="font-bold text-purple-400 text-sm">
-                  {currentTimestep?.boundarySulfateMax !== null && currentTimestep?.boundarySulfateMax !== undefined
+              <div className="bg-slate-900 p-2 rounded-lg border border-slate-800">
+                <span className="text-slate-500 block font-sans">Max Sulfate</span>
+                <span
+                  className={`font-bold text-sm ${
+                    currentTimestep?.sulfateAlert ? 'text-red-400' : 'text-purple-400'
+                  }`}
+                >
+                  {currentTimestep?.boundarySulfateMax !== null &&
+                  currentTimestep?.boundarySulfateMax !== undefined
                     ? `${currentTimestep.boundarySulfateMax.toFixed(1)} mg/L`
                     : 'MISSING'}
+                </span>
+              </div>
+              <div className="bg-slate-900 p-2 rounded-lg border border-slate-800">
+                <span className="text-slate-500 block font-sans">Target INJ-01</span>
+                <span className="font-bold text-emerald-400 text-sm">
+                  {aiReport.recommendedInjectionRateM3h.toFixed(1)} m³/h
                 </span>
               </div>
             </div>
@@ -234,7 +280,7 @@ export const AuthorizationModal: React.FC<AuthorizationModalProps> = ({
           {/* 1. ACTIVE COUNTDOWN STATE */}
           {isAwaitingApproval && (
             <div className="space-y-4">
-              <div className="p-4 bg-amber-950/40 border border-amber-800 rounded-xl space-y-2.5 text-xs text-amber-200">
+              <div className="p-4 bg-amber-950/40 border border-amber-800 rounded-xl space-y-2 text-xs text-amber-200">
                 <div className="flex items-center justify-between">
                   <span className="font-bold flex items-center gap-2 text-sm text-amber-300">
                     <Clock className="w-4 h-4 text-amber-400 animate-spin" />
@@ -254,7 +300,7 @@ export const AuthorizationModal: React.FC<AuthorizationModalProps> = ({
                 </div>
 
                 <p className="text-xs text-amber-200/90 leading-relaxed pt-0.5">
-                  <strong>Fail-Safe Protocol:</strong> Supervisor authorization is requested to halt/throttle injection. If no decision is submitted before the timer reaches 0s, the simulation automatically stops injection (<strong>Q_inj = 0.0 m³/h</strong>) while maintaining extraction containment.
+                  <strong>Fail-Safe Protocol:</strong> Approve AI mitigation below, or if unanswered before 0s, injection automatically stops (<strong>Q_inj = 0.0 m³/h</strong>).
                 </p>
               </div>
 
@@ -262,24 +308,30 @@ export const AuthorizationModal: React.FC<AuthorizationModalProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <button
                   type="button"
-                  onClick={onApprove}
-                  className="flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-black text-sm transition-colors cursor-pointer"
+                  onClick={() => onApproveRecommendedStrategy(recommendedMode)}
+                  className="flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-black text-xs sm:text-sm transition-colors cursor-pointer"
                 >
-                  <CheckCircle className="w-5 h-5" />
-                  Approve Intervention (Stop / Mitigate)
+                  <CheckCircle className="w-5 h-5 shrink-0" />
+                  <span>
+                    Approve AI Strategy (
+                    {recommendedMode === 'full_shutdown'
+                      ? 'Stop INJ = 0'
+                      : `Throttle INJ = ${aiReport.recommendedInjectionRateM3h.toFixed(1)}`}
+                    )
+                  </span>
                 </button>
 
                 <button
                   type="button"
                   onClick={onReject}
-                  className="flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-100 font-bold text-sm border border-slate-700 transition-colors cursor-pointer"
+                  className="flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-100 font-bold text-xs sm:text-sm border border-slate-700 transition-colors cursor-pointer"
                 >
-                  <XCircle className="w-5 h-5 text-slate-400" />
-                  Reject Warning (Continue Baseline)
+                  <XCircle className="w-5 h-5 text-slate-400 shrink-0" />
+                  <span>Reject Warning (Continue Baseline)</span>
                 </button>
               </div>
 
-              <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-slate-800">
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-800">
                 <button
                   type="button"
                   onClick={onClose}
@@ -288,13 +340,24 @@ export const AuthorizationModal: React.FC<AuthorizationModalProps> = ({
                   <ArrowLeft className="w-3.5 h-3.5" />
                   Return to Dashboard (Timer continues in top bar)
                 </button>
-                <button
-                  type="button"
-                  onClick={onImmediateStop}
-                  className="px-3.5 py-2 rounded-lg bg-red-950 hover:bg-red-900 border border-red-800 text-red-300 text-xs font-bold transition-colors cursor-pointer"
-                >
-                  Emergency Stop Immediately (Q_inj = 0)
-                </button>
+                <div className="flex items-center gap-2">
+                  {recommendedMode !== 'full_shutdown' && (
+                    <button
+                      type="button"
+                      onClick={onApprove}
+                      className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-cyan-300 text-xs font-semibold transition-colors cursor-pointer"
+                    >
+                      Approve Selected Mode
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={onImmediateStop}
+                    className="px-3.5 py-2 rounded-lg bg-red-950 hover:bg-red-900 border border-red-800 text-red-300 text-xs font-bold transition-colors cursor-pointer"
+                  >
+                    Emergency Stop Immediately (Q_inj = 0)
+                  </button>
+                </div>
               </div>
             </div>
           )}
@@ -308,7 +371,7 @@ export const AuthorizationModal: React.FC<AuthorizationModalProps> = ({
                   Automatic Injection Shutdown Applied (No Supervisor Response)
                 </div>
                 <p className="leading-relaxed">
-                  No response was received within the {thresholds.countdownSeconds}-second approval window. Under closed-loop safety rules, simulated injection has been stopped (<strong className="font-mono text-white">Q_inj = 0.0 m³/h</strong>) while extraction continues according to scenario settings to restore inward hydraulic containment.
+                  No response was received within the {thresholds.countdownSeconds}-second approval window. Simulated injection has been stopped (<strong className="font-mono text-white">Q_inj = 0.0 m³/h</strong>) while extraction continues to restore inward hydraulic containment.
                 </p>
               </div>
 
@@ -342,7 +405,7 @@ export const AuthorizationModal: React.FC<AuthorizationModalProps> = ({
                   Supervisor Approved Intervention
                 </div>
                 <p className="leading-relaxed">
-                  Post-intervention flow balance and risk indicators have been recalculated across the timeline.
+                  Post-intervention flow balance and AI risk indicators have been recalculated across the timeline.
                 </p>
               </div>
 

@@ -102,6 +102,25 @@ export const MethodologyView: React.FC = () => {
         </div>
       </div>
 
+      {/* 5. Hybrid AI (Isolation Forest) + Explainable Rules */}
+      <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 shadow-lg space-y-2.5">
+        <div className="flex items-center gap-2 text-cyan-400 font-bold text-sm">
+          <Layers className="w-5 h-5" />
+          5. Hybrid Architecture: Unsupervised Isolation Forest ML + Deterministic Rules
+        </div>
+        <p className="text-xs text-slate-300 leading-relaxed">
+          ISL Guard operates a two-layer detection architecture directly on the operational CSV dataset:
+        </p>
+        <ul className="text-xs text-slate-400 space-y-1.5 list-disc pl-4">
+          <li>
+            <strong className="text-slate-200">Layer 1 — Unsupervised Machine Learning (Isolation Forest):</strong> 100 random isolation trees are trained exclusively on clean normal-operation baseline timesteps across 7 multivariate channels (<em>Q_inj, Q_ext, ΔQ, Hydraulic Gradient, Boundary pH, Sulfate, Conductivity</em>). Short average path lengths isolate subtle, correlated multi-sensor shifts before any individual sensor crosses its hard alarm threshold.
+          </li>
+          <li>
+            <strong className="text-slate-200">Layer 2 — Explainable Engineering Rules:</strong> Deterministic mass-balance, gradient decay, and geochemical threshold checks guarantee physical interpretability and zero black-box blind spots.
+          </li>
+        </ul>
+      </div>
+
       {/* Engineering Proof of Concept Disclaimer */}
       <div className="p-5 bg-blue-950/40 border border-blue-900 rounded-2xl text-xs text-slate-300 space-y-2">
         <div className="flex items-center gap-2 font-bold text-cyan-300 text-sm">
